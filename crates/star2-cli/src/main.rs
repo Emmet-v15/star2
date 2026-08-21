@@ -70,7 +70,8 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "star2: {} -> room {:?} as {:?} ({}, {} kbps)",
+        "star2-engine {}: {} -> room {:?} as {:?} ({}, {} kbps)",
+        env!("CARGO_PKG_VERSION"),
         cfg.url,
         cfg.room,
         cfg.name,

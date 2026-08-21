@@ -75,7 +75,9 @@ async fn main() -> Result<()> {
     // replace, and checking first makes a missing or corrupt engine self-healing -
     // both cases simply fail the hash comparison and get reinstalled. This is also
     // the first-install path, so a user only needs star2 itself to bootstrap.
-    ensure_current(&exe).await;
+    if let Some(m) = stale_manifest(&exe).await {
+        install(&exe, &m).await;
+    }
 
     // Still not fatal if it won't start: the next check may well fix it.
     let mut child = spawn_or_warn(&exe, &args);
@@ -123,49 +125,52 @@ async fn run_session(exe: &Path, args: &[String], child: &mut Option<Child>) -> 
     }
 }
 
-/// Make the on-disk engine match the manifest. Returns true if it installed one.
-///
-/// Never fails hard: if the manifest can't be fetched we keep whatever we have,
-/// because being offline must not stop an already-working engine from running.
-async fn ensure_current(exe: &Path) -> bool {
+/// Fetch the manifest and return it ONLY if the on-disk engine doesn't match it.
+/// `None` means "nothing to do" - either we're current, or the manifest is
+/// unreachable and we should keep running what we have rather than refuse to start.
+async fn stale_manifest(exe: &Path) -> Option<Manifest> {
     let manifest = match fetch_manifest().await {
         Ok(m) => m,
         Err(e) => {
             eprintln!("  manifest unavailable ({e}) - keeping current engine");
-            return false;
+            return None;
         }
     };
     // A missing or unreadable binary hashes to nothing, which correctly reads as
     // "not current" and triggers a reinstall - that is the self-repair path.
     if let Ok(local) = local_sha(exe) {
         if local.eq_ignore_ascii_case(&manifest.sha256) {
-            return false;
+            return None;
         }
     }
-    println!("  installing build {}", manifest.version);
-    match update(exe, &manifest).await {
-        Ok(()) => {
-            println!("  now on {}", manifest.version);
-            true
-        }
-        Err(e) => {
-            eprintln!("  update failed, keeping current build: {e}");
-            false
-        }
+    Some(manifest)
+}
+
+/// Download and install `m`, reporting rather than propagating failure.
+async fn install(exe: &Path, m: &Manifest) {
+    println!("  installing build {}", m.version);
+    match update(exe, m).await {
+        Ok(()) => println!("  now on {}", m.version),
+        Err(e) => eprintln!("  update failed, keeping current build: {e}"),
     }
 }
 
-/// Check, and restart the child if the binary underneath it changed.
+/// The push path: hash differs -> stop the engine -> swap it -> start it again on
+/// the same arguments, so it rejoins the same room.
+///
+/// Stop before swapping. Windows would allow renaming the running image out of the
+/// way, but killing first means the file is untouched by anyone when we replace it,
+/// which is one less thing to be subtle about.
 async fn check_and_apply(exe: &Path, args: &[String], child: &mut Option<Child>) {
-    if !ensure_current(exe).await {
-        return;
-    }
-    // The swap happened underneath a running process (Windows allows renaming a
-    // running image), so the child is still executing the OLD build - restart it.
+    let Some(manifest) = stale_manifest(exe).await else { return };
     if let Some(c) = child.as_mut() {
+        println!("  stopping engine for update");
         let _ = c.kill();
         let _ = c.wait();
     }
+    *child = None;
+    install(exe, &manifest).await;
+    // Same `args` the user launched us with - so it rejoins the same room.
     *child = spawn_or_warn(exe, args);
 }
 
@@ -183,6 +188,16 @@ async fn update(exe: &Path, m: &Manifest) -> Result<()> {
 
     let tmp = exe.with_extension("new");
     std::fs::write(&tmp, &bytes).context("write new binary")?;
+
+    // Unix drops a freshly written file at 0644, so a downloaded engine would be
+    // non-executable and every launch would fail with EACCES. Windows has no
+    // execute bit and infers from the extension, so this is Unix-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .context("mark new binary executable")?;
+    }
 
     // Windows won't overwrite a running image, but it will rename one. Move the
     // old aside rather than deleting it, so a failed swap is recoverable.
