@@ -831,6 +831,7 @@ fn playout_loop(
     on_event: &Arc<dyn Fn(Event) + Send + Sync>,
 ) -> Result<()> {
     let mut dec = DecState::new()?;
+    let mut cur_sess: Option<SessionId> = None;
     let mut frame = vec![0.0f32; STEREO_FRAME];
     let mut scratch = vec![0i16; FRAME * 2];
     let mut last_under = underruns.load(Ordering::Relaxed);
@@ -860,6 +861,15 @@ fn playout_loop(
             let target = ((tgt_ms / FRAME_MS as f64).ceil() as usize).clamp(1, MAX_FRAMES);
             sb.target_frames = target;
 
+            if cur_sess != Some(sess) {
+                if cur_sess.is_some() {
+                    log_line(format!("[engine] sender changed -> resetting sequencer for session {sess}"));
+                }
+                dec.resync(&mut sb.pkts);
+                dec.dead = 0;
+                dec.dead_recv = 0;
+                cur_sess = Some(sess);
+            }
             let o = dec.produce(&mut sb.pkts, target, &mut frame, &mut scratch);
             match o {
                 Playout::Rendered => {
@@ -879,7 +889,15 @@ fn playout_loop(
                     }
                 }
 
-                Playout::Expanded => sb.expanded += 1,
+                Playout::Expanded => {
+                    sb.expanded += 1;
+                    dec.dead += 1;
+                    if dec.dead > RESYNC_CONCEAL && sb.recv_count > dec.dead_recv {
+                        log_line("[engine] jitter buffer stalled - resyncing".into());
+                        dec.resync(&mut sb.pkts);
+                        dec.dead = 0;
+                    }
+                }
                 Playout::Idle => {}
             }
             (o, sess)
