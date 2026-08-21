@@ -7,6 +7,11 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(target_os = "macos")]
+const MANIFEST_URL: &str = "https://v15.studio/star2-macos.json";
+#[cfg(target_os = "linux")]
+const MANIFEST_URL: &str = "https://v15.studio/star2-linux.json";
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
 const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);

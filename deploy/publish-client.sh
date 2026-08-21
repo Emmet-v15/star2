@@ -21,13 +21,16 @@ cd "$(dirname "$0")/.."
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         LOCAL=target/release/star2-engine.exe; REMOTE=star2-engine.exe
-        RUN_LOCAL=target/release/star2.exe;    RUN_REMOTE=star2.exe ;;
+        RUN_LOCAL=target/release/star2.exe;    RUN_REMOTE=star2.exe
+        MANIFEST=star2.json ;;
     Darwin)
         LOCAL=target/release/star2-engine;     REMOTE=star2-engine-macos
-        RUN_LOCAL=target/release/star2;        RUN_REMOTE=star2-macos ;;
+        RUN_LOCAL=target/release/star2;        RUN_REMOTE=star2-macos
+        MANIFEST=star2-macos.json ;;
     Linux)
         LOCAL=target/release/star2-engine;     REMOTE=star2-engine-linux
-        RUN_LOCAL=target/release/star2;        RUN_REMOTE=star2-linux ;;
+        RUN_LOCAL=target/release/star2;        RUN_REMOTE=star2-linux
+        MANIFEST=star2-linux.json ;;
     *) echo "unknown platform $(uname -s)" >&2; exit 1 ;;
 esac
 
@@ -57,7 +60,7 @@ VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/
 printf '{"version":"%s","sha256":"%s","url":"https://v15.studio/%s","runner_sha256":"%s","runner_url":"https://v15.studio/%s"}\n' \
     "$VER" "$SHA" "$REMOTE" "$RUN_SHA" "$RUN_REMOTE" > /tmp/star2.json
 scp -q /tmp/star2.json "$HOST:/tmp/star2-manifest.json"
-ssh "$HOST" "sudo -n mv -f /tmp/star2-manifest.json $WEBROOT/star2.json && sudo -n chmod 644 $WEBROOT/star2.json"
+ssh "$HOST" "sudo -n mv -f /tmp/star2-manifest.json $WEBROOT/$MANIFEST && sudo -n chmod 644 $WEBROOT/$MANIFEST"
 echo "==> manifest $VER $SHA"
 
 # Nudge every connected updater to re-check. Non-fatal: the updater polls anyway,
