@@ -542,11 +542,20 @@ async fn control_loop(
                     }
                     ServerMsg::Joined { session, name } => {
                         on_event(Event::Status(format!("{name} joined")));
-                        let me = shared.my_session();
-                        on_membership(shared, &HashSet::from([me, session]), on_event);
+                        // Union into the roster we already have, never replace it.
+                        // Building the set from just {me, joiner} silently discarded
+                        // anyone else present, so a third arrival looked like a
+                        // perfectly good pair and we would start punching someone
+                        // while the room was actually over-full.
+                        let ids = {
+                            let mut m = shared.members.lock().unwrap();
+                            m.insert(shared.my_session());
+                            m.insert(session);
+                            m.clone()
+                        };
+                        on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::Left { session } => {
-                        shared.members.lock().unwrap().remove(&session);
                         let peer = shared.p2p.lock().unwrap().peer_session;
                         if peer == Some(session) {
                             // NOT fatal. Tearing down returns us to Idle, and the
@@ -558,6 +567,18 @@ async fn control_loop(
                             go_idle(&shared, "peer left");
                             on_event(Event::Status("peer left - waiting for them to rejoin".into()));
                         }
+                        // Re-evaluate the roster: a departure can *fix* the room.
+                        // Only removing the id here was the other half of the
+                        // over-full bug - once we went idle at three members,
+                        // nothing re-examined the room as it drained back to two,
+                        // because the server sends a `Room` snapshot to joiners
+                        // only. Both remaining peers sat idle forever.
+                        let ids = {
+                            let mut m = shared.members.lock().unwrap();
+                            m.remove(&session);
+                            m.clone()
+                        };
+                        on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::P2pOffer { from, nonce, cands } => {
                         // After a teardown `peer_session` is None and no roster

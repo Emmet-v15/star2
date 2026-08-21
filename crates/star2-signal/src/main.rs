@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -183,16 +184,37 @@ async fn notify_handler(
     (axum::http::StatusCode::OK, format!("notified {n}\n"))
 }
 
+/// How often we ping an idle client. Any frame back - including the Pong the
+/// client's stack sends automatically - counts as liveness.
+const PING_EVERY: Duration = Duration::from_secs(10);
+/// Drop a session that has sent us nothing at all for this long. A client that
+/// vanished without a clean close generates no RST, so `inc.next()` blocks
+/// forever while its session keeps holding a slot in the room - ghosts were
+/// observed lingering seven minutes, telling live clients the room was full.
+const DEAD_AFTER: Duration = Duration::from_secs(30);
+
 async fn client_conn(sock: WebSocket, app: Arc<App>) {
     let (mut out, mut inc) = sock.split();
     let (tx, mut rx) = unbounded_channel::<ServerMsg>();
 
     // Pump queued ServerMsgs to the socket on their own task, so a slow client can
-    // never block the hub lock held by whoever is broadcasting to it.
+    // never block the hub lock held by whoever is broadcasting to it. It also owns
+    // the ping ticker - a client in an empty room is otherwise completely silent,
+    // and silence is exactly the case we need to probe.
     let writer = tokio::spawn(async move {
-        while let Some(m) = rx.recv().await {
-            let Ok(txt) = serde_json::to_string(&m) else { continue };
-            if out.send(Message::Text(txt.into())).await.is_err() {
+        let mut ping = tokio::time::interval(PING_EVERY);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await; // the first tick is immediate; we want the first *gap*
+        loop {
+            let sent = tokio::select! {
+                m = rx.recv() => {
+                    let Some(m) = m else { break };
+                    let Ok(txt) = serde_json::to_string(&m) else { continue };
+                    out.send(Message::Text(txt.into())).await
+                }
+                _ = ping.tick() => out.send(Message::Ping(Vec::new().into())).await,
+            };
+            if sent.is_err() {
                 break;
             }
         }
@@ -200,7 +222,17 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
 
     // --- Handshake: the first message must be a valid Hello ---
     let mut id: Option<SessionId> = None;
-    while let Some(Ok(msg)) = inc.next().await {
+    loop {
+        // Non-Text frames (notably the Pong answering our Ping) fall through to
+        // `continue` below, but arriving at all is what resets this timeout.
+        let Ok(next) = tokio::time::timeout(DEAD_AFTER, inc.next()).await else {
+            match id {
+                Some(me) => eprintln!("[signal] session {me} timed out"),
+                None => eprintln!("[signal] connection timed out before hello"),
+            }
+            break;
+        };
+        let Some(Ok(msg)) = next else { break };
         let Message::Text(txt) = msg else { continue };
         let Ok(cm) = serde_json::from_str::<ClientMsg>(&txt) else { continue };
 
