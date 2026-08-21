@@ -76,7 +76,7 @@ fn sharpen_timer() {}
 pub struct CallConfig {
 
     pub url: String,
-    pub room: String,
+    pub room_token: String,
     pub name: String,
     pub token: String,
 
@@ -95,11 +95,11 @@ impl Default for CallConfig {
 
         Self {
             url: "wss://star.v15.studio/star2".into(),
-            room: "general".into(),
+            room_token: "general".into(),
             name: "anon".into(),
             token: "ad7afaabdfe6a6636c3e3e478321039c".into(),
-            stereo: false,
-            bitrate: 128_000,
+            stereo: true,
+            bitrate: 256_000,
             input: String::new(),
             output: String::new(),
             dev_buf_ms: 0,
@@ -441,6 +441,7 @@ async fn control_loop(
         name: cfg.name.clone(),
         ver: PROTO_VERSION as u32,
         token: cfg.token.clone(),
+        build: env!("CARGO_PKG_VERSION").into(),
     })?;
 
     let mut joined = false;
@@ -477,7 +478,7 @@ async fn control_loop(
                         }
                         on_event(Event::Status(format!("candidates: {}", cands.join(", "))));
                         shared.p2p.lock().unwrap().my_cands = cands;
-                        tx.send(ClientMsg::Join { room: cfg.room.clone() })?;
+                        tx.send(ClientMsg::Join { room: cfg.room_token.clone() })?;
                         joined = true;
                     }
                     ServerMsg::Room { room, members } => {

@@ -3,7 +3,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -20,11 +21,12 @@ const USAGE: &str = "\
 star2 - runs the voice engine and keeps it up to date
 
 USAGE:
-    star2 [ENGINE OPTIONS...]
+    star2 --create <ROOM NAME>     make a room token, print it, join it
+    star2 --room <ROOM TOKEN>      join a room someone shared the token for
 
-Every option is passed straight through to star2-engine, so:
+Every other option is passed straight through to star2-engine, so:
 
-    star2 --room myroom --name me --stats
+    star2 --room gaming-k3n7qp2xza --stats
 
 Runner-specific:
     --updater-help     this (engine options: star2-engine --help)
@@ -48,6 +50,7 @@ async fn main() -> Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
+    let args = resolve_room(args);
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let exe = engine_path()?;
@@ -88,7 +91,8 @@ async fn run_session(
         .await
         .context("connect to update channel")?;
     println!("  update channel connected");
-    let (_tx, mut rx) = ws.split();
+    let (mut tx_ws, mut rx) = ws.split();
+    let _ = tx_ws.send(Message::Text(env!("CARGO_PKG_VERSION").into())).await;
 
     if check_and_apply(exe, me, args, sup).await {
         return Ok(true);
@@ -112,6 +116,36 @@ async fn run_session(
             _ = live.tick() => sup.ensure_running(exe, args),
         }
     }
+}
+
+fn resolve_room(args: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    let mut created: Option<String> = None;
+    let mut existing: Option<String> = None;
+
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--create" => {
+                let token = star2_proto::new_room_token(&it.next().unwrap_or_default());
+                println!("room {:?} created", star2_proto::room_label(&token));
+                println!();
+                println!("    {token}");
+                println!();
+                println!("  share that token - they join with:  star2 --room {token}");
+                println!("  --create mints a NEW token every run, so use --room to return to it");
+                created = Some(token);
+            }
+            "--room" => existing = it.next(),
+            _ => out.push(a),
+        }
+    }
+
+    if let Some(token) = created.or(existing) {
+        out.push("--room".into());
+        out.push(token);
+    }
+    out
 }
 
 async fn fetch_or_warn() -> Option<Manifest> {
@@ -367,5 +401,72 @@ fn supervise(exe: &Path, args: &[String], sup: &mut Supervisor, dur: Duration) {
     while Instant::now() < deadline {
         sup.ensure_running(exe, args);
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_room;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn create_becomes_a_resolved_room() {
+        let out = resolve_room(v(&["--create", "Friday Night"]));
+        assert_eq!(out[0], "--room");
+        assert_eq!(star2_proto::room_label(&out[1]), "friday-night");
+        assert!(star2_proto::is_room_token(&out[1]));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn other_args_pass_through_in_order() {
+        let out = resolve_room(v(&["--stats", "--create", "x", "--name", "me"]));
+        assert_eq!(out[..4], v(&["--stats", "--name", "me", "--room"])[..]);
+    }
+
+    #[test]
+    fn without_create_the_room_is_preserved() {
+        let out = resolve_room(v(&["--room", "gaming-k3n7qp2xza", "--stats"]));
+        assert_eq!(out, v(&["--stats", "--room", "gaming-k3n7qp2xza"]));
+    }
+
+    #[test]
+    fn a_plain_room_name_still_works() {
+        let out = resolve_room(v(&["--room", "general"]));
+        assert_eq!(out, v(&["--room", "general"]));
+    }
+
+    #[test]
+    fn a_dropped_room_flag_leaves_no_stray_value() {
+        let out = resolve_room(v(&["--room", "old-k3n7qp2xza", "--create", "new"]));
+        assert!(!out.iter().any(|a| a == "old-k3n7qp2xza"));
+        for pair in out.chunks(2) {
+            assert!(pair[0].starts_with("--"), "stray value {:?} in {out:?}", pair[0]);
+        }
+    }
+
+    #[test]
+    fn create_supersedes_an_existing_room() {
+        let out = resolve_room(v(&["--room", "old-k3n7qp2xza", "--create", "new"]));
+        assert_eq!(out.iter().filter(|a| *a == "--room").count(), 1);
+        assert_eq!(star2_proto::room_label(out.last().unwrap()), "new");
+    }
+
+    #[test]
+    fn there_is_exactly_one_room_vocabulary() {
+        let out = resolve_room(v(&["--create", "gaming"]));
+        assert!(out.contains(&"--room".to_string()));
+        assert!(!out.contains(&"--join".to_string()));
+        assert!(!out.contains(&"--create".to_string()));
+    }
+
+    #[test]
+    fn resolved_args_are_stable_across_restarts() {
+        let once = resolve_room(v(&["--create", "gaming"]));
+        assert_eq!(resolve_room(once.clone()), once);
+        assert_eq!(resolve_room(resolve_room(once.clone())), once);
     }
 }

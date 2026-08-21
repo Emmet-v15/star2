@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+mod room;
+pub use room::{is_room_token, new_room_token, room_label, slugify};
+
 pub const PROTO_VERSION: u8 = 1;
 
 pub const MEDIA_HEADER_LEN: usize = 12;
@@ -21,7 +24,7 @@ pub mod flags {
 #[serde(tag = "t")]
 pub enum ClientMsg {
 
-    Hello { name: String, ver: u32, token: String },
+    Hello { name: String, ver: u32, token: String, #[serde(default)] build: String },
 
     Join { room: String },
 
@@ -195,6 +198,21 @@ impl PunchProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hello_without_build_is_a_stale_client() {
+        let old = r#"{"t":"Hello","name":"pc","ver":1,"token":"x"}"#;
+        let got: ClientMsg = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            got,
+            ClientMsg::Hello {
+                name: "pc".into(),
+                ver: 1,
+                token: "x".into(),
+                build: String::new(),
+            }
+        );
+    }
 
     #[test]
     fn media_header_roundtrip() {

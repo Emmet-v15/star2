@@ -16,11 +16,12 @@ USAGE:
 
 OPTIONS:
     --url <URL>        signal server           [default: wss://star.v15.studio/star2]
-    --room <NAME>      room to join - both peers must match    [default: general]
-    --name <NAME>      your display name                       [default: hostname]
+    --room <TOKEN>     room token to join                      [default: general]
+    --create <NAME>    make a new room token and join it (prefer `star2 --create`)
+    --name <NAME>      your display name                       [default: this PC's name]
     --token <TOKEN>    shared secret                           [default: baked in]
-    --stereo           send 2 channels instead of 1
-    --bitrate <BPS>    Opus bitrate                            [default: 128000 mono / 256000 stereo]
+    --mono             send 1 channel instead of 2
+    --bitrate <BPS>    Opus bitrate                            [default: 256000 stereo / 128000 mono]
     --input <SUBSTR>   input device name match                 [default: system default]
     --output <SUBSTR>  output device name match                [default: system default]
     --dev-buf <MS>     device buffer request, 0 = default      [default: 0]
@@ -38,10 +39,11 @@ fn main() -> Result<()> {
         let mut val = || args.next().unwrap_or_default();
         match a.as_str() {
             "--url" => cfg.url = val(),
-            "--room" => cfg.room = val(),
+            "--room" => cfg.room_token = val(),
+            "--create" => cfg.room_token = star2_proto::new_room_token(&val()),
             "--name" => cfg.name = val(),
             "--token" => cfg.token = val(),
-            "--stereo" => cfg.stereo = true,
+            "--mono" => cfg.stereo = false,
             "--bitrate" => bitrate = val().parse().ok(),
             "--input" => cfg.input = val(),
             "--output" => cfg.output = val(),
@@ -62,16 +64,17 @@ fn main() -> Result<()> {
 
     cfg.bitrate = bitrate.unwrap_or(if cfg.stereo { 256_000 } else { 128_000 });
     if cfg.name == "anon" {
-        if let Ok(h) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+        if let Some(h) = pc_name() {
             cfg.name = h;
         }
     }
 
     println!(
-        "star2-engine {}: {} -> room {:?} as {:?} ({}, {} kbps)",
+        "star2-engine {}: {} -> room {:?} [{}] as {:?} ({}, {} kbps)",
         env!("CARGO_PKG_VERSION"),
         cfg.url,
-        cfg.room,
+        star2_proto::room_label(&cfg.room_token),
+        cfg.room_token,
         cfg.name,
         if cfg.stereo { "stereo" } else { "mono" },
         cfg.bitrate / 1000
@@ -99,6 +102,14 @@ fn main() -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
     }
+}
+
+fn pc_name() -> Option<String> {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    let name = raw.trim().trim_end_matches('.');
+    let name = name.strip_suffix(".local").unwrap_or(name);
+    let name = name.split('.').next().unwrap_or(name).trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn list_devices() -> Result<()> {

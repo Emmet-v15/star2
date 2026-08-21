@@ -10,6 +10,7 @@ name = "star2"
 path = "src/main.rs"
 
 [dependencies]
+star2-proto = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

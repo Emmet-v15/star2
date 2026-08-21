@@ -123,7 +123,7 @@ async fn updater_conn(sock: WebSocket, app: Arc<App>) {
     let (mut out, mut inc) = sock.split();
     let (tx, mut rx) = unbounded_channel::<String>();
     app.updates.lock().unwrap().push(tx);
-    eprintln!("[signal] updater connected ({} total)", app.updates.lock().unwrap().len());
+    let n = app.updates.lock().unwrap().len();
 
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
@@ -132,6 +132,12 @@ async fn updater_conn(sock: WebSocket, app: Arc<App>) {
             }
         }
     });
+
+    let build = match tokio::time::timeout(Duration::from_secs(5), inc.next()).await {
+        Ok(Some(Ok(Message::Text(v)))) => v.to_string(),
+        _ => "stale(<0.2.0)".to_string(),
+    };
+    eprintln!("[signal] updater connected build={build} ({n} total)");
 
     while let Some(Ok(_)) = inc.next().await {}
     writer.abort();
@@ -200,7 +206,7 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
 
         let Some(me) = id else {
             match cm {
-                ClientMsg::Hello { name, ver, token } => {
+                ClientMsg::Hello { name, ver, token, build } => {
                     if ver != star2_proto::PROTO_VERSION as u32 {
                         let _ = tx.send(ServerMsg::Error { msg: format!("proto {ver} != {}", star2_proto::PROTO_VERSION) });
                         break;
@@ -215,7 +221,8 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
                         Session { name: name.clone(), room: None, tx: tx.clone() },
                     );
                     let _ = tx.send(ServerMsg::Welcome { session: me, reflex: app.reflex.clone() });
-                    eprintln!("[signal] session {me} hello name={name}");
+                    let build = if build.is_empty() { "stale(<0.2.0)".into() } else { build };
+                    eprintln!("[signal] session {me} hello name={name} build={build}");
                     id = Some(me);
                 }
                 _ => {

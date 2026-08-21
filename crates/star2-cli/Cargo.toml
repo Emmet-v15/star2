@@ -11,5 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 star2-engine = { path = "../star2-engine" }
+star2-proto = { workspace = true }
 anyhow = { workspace = true }
 cpal = "0.15"
+
+# std has no hostname API. COMPUTERNAME is Windows-only and HOSTNAME is a bash
+# shell variable that is never exported, so the old env-var lookup left every
+# mac and linux user named "anon".
+gethostname = "1"
