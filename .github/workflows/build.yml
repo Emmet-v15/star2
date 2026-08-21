@@ -77,8 +77,10 @@ jobs:
       - run: cargo install cargo-zigbuild
       - uses: goto-bus-stop/setup-zig@v2
       - run: cargo zigbuild -p star2-signal --release --target aarch64-unknown-linux-gnu.2.34
-      - uses: actions/upload-artifact@v4
-        with:
-          name: star2-signal-aarch64
-          path: target/aarch64-unknown-linux-gnu/release/star2-signal
-          if-no-files-found: error
+      - name: Publish signal to dev-builds release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp target/aarch64-unknown-linux-gnu/release/star2-signal star2-signal-aarch64
+          gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
+          gh release upload dev-builds star2-signal-aarch64 --clobber
