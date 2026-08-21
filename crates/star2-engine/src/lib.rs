@@ -511,6 +511,7 @@ async fn control_loop(
                                 continue;
                             }
                             s.peer_session = Some(from);
+                            shared.inbox.lock().unwrap().clear();
                             if s.local_nonce == 0 {
                                 s.local_nonce = rand_u64();
                             }
@@ -599,6 +600,7 @@ fn on_membership(
 
         let my_cands = s.my_cands.clone();
         *s = P2pState::new();
+        shared.inbox.lock().unwrap().clear();
         s.peer_session = Some(peer);
         s.local_nonce = rand_u64();
         s.my_cands = my_cands.clone();
