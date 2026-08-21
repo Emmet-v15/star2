@@ -146,12 +146,16 @@ async fn stale_manifest(exe: &Path) -> Option<Manifest> {
     Some(manifest)
 }
 
-/// Download and install `m`, reporting rather than propagating failure.
+/// Download, verify and install `m`. Used at startup, when no engine is running
+/// yet so there is nothing to stop.
 async fn install(exe: &Path, m: &Manifest) {
     println!("  installing build {}", m.version);
-    match update(exe, m).await {
-        Ok(()) => println!("  now on {}", m.version),
-        Err(e) => eprintln!("  update failed, keeping current build: {e}"),
+    match stage(exe, m).await {
+        Ok(tmp) => match swap(exe, &tmp) {
+            Ok(()) => println!("  now on {}", m.version),
+            Err(e) => eprintln!("  install failed, keeping current build: {e}"),
+        },
+        Err(e) => eprintln!("  download failed, keeping current build: {e}"),
     }
 }
 
@@ -163,26 +167,51 @@ async fn install(exe: &Path, m: &Manifest) {
 /// which is one less thing to be subtle about.
 async fn check_and_apply(exe: &Path, args: &[String], child: &mut Option<Child>) {
     let Some(manifest) = stale_manifest(exe).await else { return };
+    println!("  downloading build {}", manifest.version);
+
+    // Download and verify FIRST, while the engine keeps running. This is the slow
+    // part, and there is no reason to interrupt a call for it - if the download or
+    // the hash check fails we simply carry on, having disturbed nothing.
+    let staged = match stage(exe, &manifest).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  download failed, staying on current build: {e}");
+            return;
+        }
+    };
+
+    // Only now stop the engine: from here it is a rename and a relaunch.
     if let Some(c) = child.as_mut() {
-        println!("  stopping engine for update");
+        println!("  stopping engine to swap in {}", manifest.version);
         let _ = c.kill();
         let _ = c.wait();
     }
     *child = None;
-    install(exe, &manifest).await;
+
+    if let Err(e) = swap(exe, &staged) {
+        eprintln!("  install failed: {e}");
+    } else {
+        println!("  now on {}", manifest.version);
+    }
     // Same `args` the user launched us with - so it rejoins the same room.
     *child = spawn_or_warn(exe, args);
 }
 
 /// Download, verify, and move into place. The download lands beside the target so
 /// the final move is same-volume (and therefore atomic).
-async fn update(exe: &Path, m: &Manifest) -> Result<()> {
+/// Download and verify into a staging file beside the target.
+///
+/// Deliberately does NOT touch the running binary: this is the slow part (seconds
+/// of network), so it happens while the engine is still up and on a call. Only the
+/// rename in [`swap`] needs the engine stopped.
+async fn stage(exe: &Path, m: &Manifest) -> Result<PathBuf> {
     let bytes = reqwest::get(&m.url).await?.error_for_status()?.bytes().await?;
 
     let got = hex(Sha256::digest(&bytes).as_slice());
     if !got.eq_ignore_ascii_case(&m.sha256) {
         // Refusing here is the whole point of the manifest: a truncated or
-        // tampered download must never be executed.
+        // tampered download must never be executed. Staging separately means we
+        // find this out BEFORE stopping a working engine.
         bail!("sha256 mismatch (manifest {}, got {got})", m.sha256);
     }
 
@@ -198,20 +227,18 @@ async fn update(exe: &Path, m: &Manifest) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
             .context("mark new binary executable")?;
     }
+    Ok(tmp)
+}
 
-    // Windows won't overwrite a running image, but it will rename one. Move the
-    // old aside rather than deleting it, so a failed swap is recoverable.
-    let old = exe.with_extension("old");
-    let _ = std::fs::remove_file(&old);
-    if exe.exists() {
-        std::fs::rename(exe, &old).context("move old binary aside")?;
-    }
-    if let Err(e) = std::fs::rename(&tmp, exe) {
-        let _ = std::fs::rename(&old, exe); // put it back
-        return Err(e).context("install new binary");
-    }
-    let _ = std::fs::remove_file(&old);
-    Ok(())
+/// Overwrite the engine with the staged file. One rename, so the window where no
+/// engine exists is microseconds rather than the length of a download.
+///
+/// The engine is already stopped by this point, so nothing holds the file and a
+/// plain rename replaces it (`MoveFileEx` with replace-existing on Windows, an
+/// atomic same-directory rename on unix). No backup copy is needed: a rename
+/// either happens or it doesn't, and if it doesn't the old engine is untouched.
+fn swap(exe: &Path, staged: &Path) -> Result<()> {
+    std::fs::rename(staged, exe).context("overwrite engine with staged build")
 }
 
 async fn fetch_manifest() -> Result<Manifest> {
