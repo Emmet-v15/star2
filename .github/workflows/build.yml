@@ -34,7 +34,7 @@ jobs:
       # libopus is built for the host arch, so each runner produces a native
       # binary - macos-latest is Apple Silicon, macos-13 is Intel.
       - name: Build client
-        run: cargo build --release -p star2-cli
+        run: cargo build --release -p star2-cli -p star2-updater
 
       - name: Test
         run: cargo test --release -p star2-proto -p star2-engine
@@ -43,6 +43,8 @@ jobs:
         with:
           name: star2-${{ matrix.name }}
           path: |
+            target/release/star2-engine
+            target/release/star2-engine.exe
             target/release/star2
             target/release/star2.exe
           if-no-files-found: error
