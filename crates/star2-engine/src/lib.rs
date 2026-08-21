@@ -200,6 +200,15 @@ struct Shared {
     stop: Arc<AtomicBool>,
 }
 
+/// Return to idle after a call drops: clear the pairing AND the stale receive
+/// buffer. Without the second part, a peer that rejoins gets a NEW session id and
+/// the dead one lingers in the inbox - where playout, which just takes the first
+/// entry in the map, may keep reading it forever.
+fn go_idle(shared: &Arc<Shared>, why: &str) {
+    p2p_teardown(&shared.p2p, &shared.route, why);
+    shared.inbox.lock().unwrap().clear();
+}
+
 /// Linear amplitude (0..1) to dBFS, floored at -99 so silence prints finitely.
 fn to_dbfs(peak: f32) -> f32 {
     if peak <= 1e-5 {
@@ -533,8 +542,14 @@ async fn control_loop(
                     ServerMsg::Left { session } => {
                         let peer = shared.p2p.lock().unwrap().peer_session;
                         if peer == Some(session) {
-                            p2p_teardown(&shared.p2p, &shared.route, "peer left");
-                            on_event(Event::Ended("peer left".into()));
+                            // NOT fatal. Tearing down returns us to Idle, and the
+                            // roster event when they rejoin starts a fresh
+                            // negotiation - so we can just wait. Exiting here meant
+                            // the supervisor restarted us for nothing: a reconnect,
+                            // a new session and an audio-device re-init, every time
+                            // someone hung up.
+                            go_idle(&shared, "peer left");
+                            on_event(Event::Status("peer left - waiting for them to rejoin".into()));
                         }
                     }
                     ServerMsg::P2pOffer { from, nonce, cands } => {
@@ -575,8 +590,11 @@ async fn control_loop(
                     }
                     ServerMsg::P2pAbort { from } => {
                         if shared.p2p.lock().unwrap().peer_session == Some(from) {
-                            p2p_teardown(&shared.p2p, &shared.route, "peer aborted");
-                            on_event(Event::Ended("peer gave up on the direct path".into()));
+                            // Also not fatal: back to Idle and wait for a retry.
+                            go_idle(&shared, "peer aborted");
+                            on_event(Event::Status(
+                                "peer gave up on the direct path - waiting".into(),
+                            ));
                         }
                     }
                     ServerMsg::Error { msg } => bail!("server: {msg}"),
@@ -730,8 +748,12 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     if let Some(p) = peer {
                         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
                     }
-                    on_event(Event::Ended(
-                        "hole punch failed - no direct path (symmetric NAT/CGNAT?)".into(),
+                    // Stay alive and idle: the peer may rejoin, and a fresh roster
+                    // event starts a clean negotiation. Exiting would just make the
+                    // supervisor restart us into the same situation.
+                    go_idle(&shared, "punch timeout");
+                    on_event(Event::Status(
+                        "hole punch failed - no direct path (symmetric NAT/CGNAT?) - waiting".into(),
                     ));
                     continue;
                 }
@@ -751,7 +773,8 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     if let Some(p) = peer {
                         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
                     }
-                    on_event(Event::Ended("peer stopped responding".into()));
+                    go_idle(&shared, "direct path died");
+                    on_event(Event::Status("peer stopped responding - waiting".into()));
                     continue;
                 }
                 // Small keepalive probe holds the NAT mapping open when nobody talks.
