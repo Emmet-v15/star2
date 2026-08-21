@@ -1,0 +1,21 @@
+[package]
+name = "star2-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This is what a user actually runs: it supervises and updates star2-engine.
+[[bin]]
+name = "star2"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

@@ -32,10 +32,37 @@ tuning was worked out.
 
 ## Running
 
+Download `star2.exe` from v15.studio once and run it. It fetches the engine itself:
+
 ```sh
-cargo build --release
-./target/release/star2 --url wss://star.v15.studio/star2 --token <TOKEN> --room general --name me
+star2.exe --room general --name me
 ```
+
+`star2` is the **runner**: it verifies the engine's SHA-256 against the manifest,
+downloads it if stale, then launches and supervises it. Every flag is passed
+straight through. `star2-engine` is the actual voice client and can be run
+directly — you just don't get auto-update.
+
+The split exists because Windows won't overwrite a running image, so something has
+to outlive the engine to replace it. It also means the part that changes often
+(the engine) is the part that auto-updates, while the supervisor rarely moves.
+
+### How updates arrive
+
+| path | when |
+|---|---|
+| WebSocket push | instant — `publish-client.sh` POSTs `/star2/notify`, the server fans out a nudge |
+| on connect | catches builds shipped while the runner was offline |
+| 5-minute poll | fallback, because a dead WebSocket looks exactly like a quiet one |
+
+The nudge carries no payload beyond "go look again". The manifest and binary are
+fetched over TLS and checked against the manifest's SHA-256, so a forged nudge can
+at worst cause a wasted re-download. It is **not** a signature: anyone who can
+write the webroot can ship a build, which is the same trust boundary as the
+download itself.
+
+A missing or corrupt engine simply fails the hash comparison and is reinstalled,
+so the runner repairs itself rather than bricking.
 
 Both peers must pass the same `--room`. The lower session id becomes the punch
 controller, so glare can't happen.

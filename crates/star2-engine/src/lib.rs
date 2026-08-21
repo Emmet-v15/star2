@@ -371,7 +371,18 @@ where
                 }
             };
             if let Err(e) = rt.block_on(control_loop(&cfg, &shared, &sock, local_port, &on_event)) {
-                if !shared.stop.load(Ordering::Relaxed) {
+                if shared.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Signalling is a rendezvous, not a lifeline. Once the punch has
+                // confirmed, media flows peer-to-peer and the server is out of the
+                // path entirely - so losing it (restart, flaky wifi, deploy) must
+                // NOT end a call that is otherwise perfectly healthy.
+                if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
+                    on_event(Event::Status(format!(
+                        "signalling lost ({e}) - call continues on the direct path"
+                    )));
+                } else {
                     on_event(Event::Ended(format!("signaling: {e}")));
                 }
             }

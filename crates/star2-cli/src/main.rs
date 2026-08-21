@@ -8,10 +8,13 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use star2_engine::{start_call, CallConfig, Event};
 
 const USAGE: &str = "\
-star2 - P2P voice call (48 kHz Opus, direct UDP)
+star2-engine - P2P voice call (48 kHz Opus, direct UDP)
+
+Normally launched by `star2`, which supervises and updates it. Running it
+directly is fine too - you just don't get auto-update.
 
 USAGE:
-    star2 [OPTIONS]
+    star2-engine [OPTIONS]
 
 OPTIONS:
     --url <URL>        signal server           [default: wss://star.v15.studio/star2]

@@ -40,6 +40,9 @@ struct App {
     token: String,
     /// The public `host:port` clients should send REFLEX probes to.
     reflex: String,
+    /// Connected updaters waiting to be told a new build exists. These are NOT call
+    /// sessions - they hold no room and never touch media.
+    updates: Mutex<Vec<UnboundedSender<String>>>,
 }
 
 impl App {
@@ -83,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         next_session: AtomicU32::new(1),
         token,
         reflex: reflex.clone(),
+        updates: Mutex::new(Vec::new()),
     });
 
     // --- UDP reflexive responder (our mini-STUN) ---
@@ -109,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
     // --- WebSocket rendezvous ---
     let router = axum::Router::new()
         .route("/", get(ws_handler))
+        .route("/updates", get(updates_handler))
+        .route("/notify", axum::routing::post(notify_handler))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&ws_bind).await?;
     eprintln!("[signal] ws on {ws_bind}");
@@ -122,6 +128,59 @@ fn env_or(key: &str, default: &str) -> String {
 
 async fn ws_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl IntoResponse {
     ws.on_upgrade(move |sock| client_conn(sock, app))
+}
+
+// ---------------------------------------------------------------------------
+// Update notification plane
+// ---------------------------------------------------------------------------
+// Deliberately dumb: the server never stores or serves a build, it only says
+// "go look again". The updater fetches the manifest from v15.studio and decides
+// for itself, so a malicious or confused nudge can't point anyone at a binary.
+
+/// `GET /updates` - an updater parks here waiting for a nudge. No auth: the only
+/// thing it can learn is that a build happened.
+async fn updates_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl IntoResponse {
+    ws.on_upgrade(move |sock| updater_conn(sock, app))
+}
+
+async fn updater_conn(sock: WebSocket, app: Arc<App>) {
+    let (mut out, mut inc) = sock.split();
+    let (tx, mut rx) = unbounded_channel::<String>();
+    app.updates.lock().unwrap().push(tx);
+    eprintln!("[signal] updater connected ({} total)", app.updates.lock().unwrap().len());
+
+    let writer = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if out.send(Message::Text(m.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    // We expect nothing from an updater; this just waits for the socket to close.
+    while let Some(Ok(_)) = inc.next().await {}
+    writer.abort();
+    // Drop closed senders: this is the only place the list is pruned.
+    app.updates.lock().unwrap().retain(|t| !t.is_closed());
+    eprintln!("[signal] updater gone ({} left)", app.updates.lock().unwrap().len());
+}
+
+/// `POST /notify` with header `x-token: <token>` - tell every updater to re-check.
+/// Called by `deploy/publish-client.sh` right after a successful upload.
+async fn notify_handler(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let ok = headers.get("x-token").and_then(|v| v.to_str().ok()) == Some(app.token.as_str());
+    if !ok {
+        return (axum::http::StatusCode::UNAUTHORIZED, "bad token\n".to_string());
+    }
+    let subs = app.updates.lock().unwrap();
+    for t in subs.iter() {
+        let _ = t.send(r#"{"t":"Update"}"#.to_string());
+    }
+    let n = subs.len();
+    eprintln!("[signal] notified {n} updater(s)");
+    (axum::http::StatusCode::OK, format!("notified {n}\n"))
 }
 
 async fn client_conn(sock: WebSocket, app: Arc<App>) {

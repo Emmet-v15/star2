@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The engine is the supervised child; `star2` itself is the updater/runner.
 [[bin]]
-name = "star2"
+name = "star2-engine"
 path = "src/main.rs"
 
 [dependencies]
