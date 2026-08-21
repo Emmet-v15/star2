@@ -20,3 +20,8 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+# Windows' default timer granularity is ~15.6 ms - far coarser than our 5 ms frame,
+# which makes every short sleep overshoot and the output ring under-run.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Media"] }

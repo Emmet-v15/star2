@@ -81,6 +81,19 @@ pub fn log_line(line: String) {
     eprintln!("{line}");
 }
 
+/// Ask Windows for 1 ms timer granularity. The default (~15.6 ms) is three times our
+/// frame, so `sleep(1ms)` overshoots badly: the output ring drains dry between wakeups
+/// and the adaptive buffer compensates by growing, costing real mouth-to-ear latency.
+/// Process-wide and left set for the process lifetime; harmless if it fails.
+#[cfg(windows)]
+fn sharpen_timer() {
+    unsafe {
+        let _ = windows::Win32::Media::timeBeginPeriod(1);
+    }
+}
+#[cfg(not(windows))]
+fn sharpen_timer() {}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -105,11 +118,14 @@ pub struct CallConfig {
 
 impl Default for CallConfig {
     fn default() -> Self {
+        // Defaults point at the deployed server so a bare `star2` just works. The
+        // token only gates the rendezvous, and anyone who can download the binary
+        // has it anyway - it stops strangers stumbling in, not a real attacker.
         Self {
-            url: "ws://127.0.0.1:9101".into(),
+            url: "wss://star.v15.studio/star2".into(),
             room: "general".into(),
             name: "anon".into(),
-            token: "star2-dev".into(),
+            token: "ad7afaabdfe6a6636c3e3e478321039c".into(),
             stereo: false,
             bitrate: 128_000,
             input: String::new(),
@@ -127,8 +143,10 @@ pub enum Event {
     Direct(SocketAddr),
     /// The call ended and will not recover (punch failed, peer left, path died).
     Ended(String),
-    /// Periodic 1 Hz readout while a call is live.
-    Stats { jitter_ms: f64, target_ms: f64, loss_pct: f32, out_ms: f64 },
+    /// Periodic 1 Hz readout while a call is live. `rx_pps` / `play_fps` should both
+    /// sit at 1000/FRAME_MS (200); a gap between them is the loss, and which one is
+    /// wrong says whether the sender or the playout clock is at fault.
+    Stats { jitter_ms: f64, target_ms: f64, loss_pct: f32, out_ms: f64, rx_pps: u64, play_fps: u64 },
 }
 
 /// Owns the running call. Dropping it stops every thread.
@@ -193,6 +211,7 @@ pub fn start_call<F>(cfg: CallConfig, on_event: F) -> Result<CallHandle>
 where
     F: Fn(Event) + Send + Sync + 'static,
 {
+    sharpen_timer();
     let on_event: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(on_event);
     let stop = Arc::new(AtomicBool::new(false));
     let send_ch = if cfg.stereo { 2 } else { 1 };
@@ -468,7 +487,11 @@ async fn control_loop(
                         joined = true;
                     }
                     ServerMsg::Room { room, members } => {
-                        on_event(Event::Status(format!("room {room}: {} member(s)", members.len())));
+                        on_event(Event::Status(if members.len() < 2 {
+                            format!("in room {room:?} alone - waiting for your peer to join the same room")
+                        } else {
+                            format!("room {room:?}: {} members", members.len())
+                        }));
                         let ids: HashSet<SessionId> = members.iter().map(|m| m.session).collect();
                         on_membership(shared, &ids, on_event);
                     }
@@ -787,33 +810,39 @@ fn playout_loop(
     let mut clean_since = Instant::now();
     let mut clean_needed = OUT_SHRINK_AFTER_S;
     let mut last_stats = Instant::now();
-    let mut next_tick = Instant::now();
+    // Previous-window counters, so the readout is per-second rather than lifetime.
+    let (mut win_played, mut win_concealed, mut win_recv) = (0u64, 0u64, 0u64);
 
     while !shared.stop.load(Ordering::Relaxed) {
-        // Fill-driven pacing: sleep until the output ring wants another frame.
-        next_tick += Duration::from_millis(FRAME_MS as u64);
-        let now = Instant::now();
-        if next_tick > now {
-            std::thread::sleep(next_tick - now);
-        } else if now - next_tick > Duration::from_millis(100) {
-            next_tick = now; // we fell far behind (device stall); don't spin to catch up
+        // FILL-DRIVEN pacing: the output device is the master clock. We emit a frame
+        // only once the device ring has drained below its target depth, so playout
+        // consumes at exactly the rate the hardware plays.
+        //
+        // A wall-clock tick cannot do this. Sleep granularity (~15.6 ms on Windows,
+        // vs our 5 ms frame) makes the loop fall behind and then spin to catch up,
+        // advancing the sequencer faster than packets arrive; `retain` then drops
+        // those arrivals as stale and every slot conceals until the desync watchdog
+        // fires. That sawtooth is what a steady double-digit loss rate looks like.
+        if master.occupied_len() >= out_target.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
         }
 
-        // Only one sender in a 1:1 call, but keyed by session so a re-join is clean.
-        let (target, sess) = {
+        // ONE lock acquisition per iteration. Taking it twice let this thread - which
+        // loops far faster than 200 Hz - monopolise the mutex and starve `recv_loop`,
+        // so datagrams piled up in the socket buffer and were dropped by the kernel.
+        // That showed up as a collapsed receive rate, not as network loss.
+        let (outcome, sess) = {
             let mut inbox = shared.inbox.lock().unwrap();
             let Some((&sess, sb)) = inbox.iter_mut().next().map(|(k, v)| (k, v)) else {
+                drop(inbox);
+                std::thread::sleep(Duration::from_millis(2));
                 continue;
             };
             let tgt_ms = sb.est.target_ms(JB_PCTILE, JITTER_K, JITTER_MARGIN_MS);
-            let frames = ((tgt_ms / FRAME_MS as f64).ceil() as usize).clamp(1, MAX_FRAMES);
-            sb.target_frames = frames;
-            (frames, sess)
-        };
+            let target = ((tgt_ms / FRAME_MS as f64).ceil() as usize).clamp(1, MAX_FRAMES);
+            sb.target_frames = target;
 
-        let outcome = {
-            let mut inbox = shared.inbox.lock().unwrap();
-            let Some(sb) = inbox.get_mut(&sess) else { continue };
             let o = dec.produce(&mut sb.pkts, target, &mut frame, &mut scratch);
             match o {
                 Playout::Rendered => {
@@ -836,13 +865,17 @@ fn playout_loop(
                 }
                 Playout::Idle => {}
             }
-            o
+            (o, sess)
         };
 
-        if !matches!(outcome, Playout::Idle) {
-            for &s in frame.iter() {
-                let _ = master.try_push(s);
-            }
+        if matches!(outcome, Playout::Idle) {
+            // Still pre-buffering. Without this sleep the loop spins at full tilt
+            // re-taking the lock, which is exactly what starved the recv thread.
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        for &s in frame.iter() {
+            let _ = master.try_push(s);
         }
         out_fill.store(master.occupied_len(), Ordering::Relaxed);
 
@@ -869,20 +902,27 @@ fn playout_loop(
         }
 
         if last_stats.elapsed() >= Duration::from_secs(1) {
+            let secs = last_stats.elapsed().as_secs_f64();
             last_stats = Instant::now();
             let inbox = shared.inbox.lock().unwrap();
             if let Some(sb) = inbox.get(&sess) {
-                let loss = if sb.played > 0 {
-                    sb.concealed as f32 / sb.played as f32 * 100.0
-                } else {
-                    0.0
-                };
+                // Windowed, not cumulative: a lifetime average hides recovery, and
+                // startup pre-buffering would dominate it forever.
+                let played = sb.played - win_played;
+                let concealed = sb.concealed - win_concealed;
+                let rx = sb.recv_count - win_recv;
+                win_played = sb.played;
+                win_concealed = sb.concealed;
+                win_recv = sb.recv_count;
+                let loss = if played > 0 { concealed as f32 / played as f32 * 100.0 } else { 0.0 };
                 on_event(Event::Stats {
                     jitter_ms: sb.est.mean_abs,
                     target_ms: sb.target_frames as f64 * FRAME_MS as f64,
                     loss_pct: loss,
                     out_ms: out_fill.load(Ordering::Relaxed) as f64 / STEREO_FRAME as f64
                         * FRAME_MS as f64,
+                    rx_pps: (rx as f64 / secs).round() as u64,
+                    play_fps: (played as f64 / secs).round() as u64,
                 });
             }
         }

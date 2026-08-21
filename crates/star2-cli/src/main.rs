@@ -14,15 +14,16 @@ USAGE:
     star2 [OPTIONS]
 
 OPTIONS:
-    --url <URL>        signal server, e.g. ws://empire:9101   [default: ws://127.0.0.1:9101]
-    --room <NAME>      room to join                            [default: general]
+    --url <URL>        signal server           [default: wss://star.v15.studio/star2]
+    --room <NAME>      room to join - both peers must match    [default: general]
     --name <NAME>      your display name                       [default: hostname]
-    --token <TOKEN>    shared secret                           [default: star2-dev]
+    --token <TOKEN>    shared secret                           [default: baked in]
     --stereo           send 2 channels instead of 1
     --bitrate <BPS>    Opus bitrate                            [default: 128000 mono / 256000 stereo]
     --input <SUBSTR>   input device name match                 [default: system default]
     --output <SUBSTR>  output device name match                [default: system default]
     --dev-buf <MS>     device buffer request, 0 = default      [default: 0]
+    --stats            print the 1 Hz jitter/loss/rate readout
     --list-devices     print audio devices and exit
     -h, --help         this
 ";
@@ -30,6 +31,7 @@ OPTIONS:
 fn main() -> Result<()> {
     let mut cfg = CallConfig::default();
     let mut bitrate: Option<i32> = None;
+    let mut stats = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_default();
@@ -43,6 +45,7 @@ fn main() -> Result<()> {
             "--input" => cfg.input = val(),
             "--output" => cfg.output = val(),
             "--dev-buf" => cfg.dev_buf_ms = val().parse().unwrap_or(0),
+            "--stats" => stats = true,
             "--list-devices" => return list_devices(),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -82,9 +85,11 @@ fn main() -> Result<()> {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Event::Status(s)) => println!("  {s}"),
             Ok(Event::Direct(addr)) => println!("  direct path up: {addr}"),
-            Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms }) => println!(
-                "  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms"
-            ),
+            Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms, rx_pps, play_fps }) => {
+                if stats {
+                    println!("  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms  rx {rx_pps}/s  play {play_fps}/s");
+                }
+            }
             Ok(Event::Ended(why)) => {
                 println!("call ended: {why}");
                 return Ok(());
