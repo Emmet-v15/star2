@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   client:
     strategy:
@@ -39,15 +42,28 @@ jobs:
       - name: Test
         run: cargo test --release -p star2-proto -p star2-engine
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: star2-${{ matrix.name }}
-          path: |
-            target/release/star2-engine
-            target/release/star2-engine.exe
-            target/release/star2
-            target/release/star2.exe
-          if-no-files-found: error
+      # Releases, not upload-artifact: Actions artifact storage is quota-limited
+      # on a private repo and uploads fail there long before the build does.
+      - name: Stage binaries
+        shell: bash
+        run: |
+          mkdir -p out
+          for b in star2 star2-engine; do
+            for f in "target/release/$b" "target/release/$b.exe"; do
+              [ -f "$f" ] || continue
+              ext=""; case "$f" in *.exe) ext=".exe";; esac
+              cp "$f" "out/${b}-${{ matrix.name }}${ext}"
+            done
+          done
+          ls -la out
+
+      - name: Publish to dev-builds release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
+          gh release upload dev-builds out/* --clobber
 
   signal:
     # The signal server is pure Rust (no C deps), so it cross-compiles to the
