@@ -36,6 +36,8 @@ pub(crate) struct DecState {
     pub(crate) dead: u32,
     pub(crate) jb_sum_us: u64,
     pub(crate) jb_n: u64,
+    pub(crate) over: u32,
+    pub(crate) contracted: u64,
     pub(crate) dead_recv: u64,
 
     pub(crate) late_dropped: u64,
@@ -55,6 +57,8 @@ impl DecState {
             dead: 0,
             jb_sum_us: 0,
             jb_n: 0,
+            over: 0,
+            contracted: 0,
             dead_recv: 0,
             late_dropped: 0,
             resyncs: 0,
@@ -134,6 +138,17 @@ impl DecState {
                 pkts.remove(&n);
                 n = n.wrapping_add(1);
             }
+            self.over = 0;
+        } else if pkts.len() > target + 1 {
+            self.over += 1;
+            if self.over >= CONTRACT_EVERY {
+                self.over = 0;
+                self.contracted += 1;
+                pkts.remove(&n);
+                n = n.wrapping_add(1);
+            }
+        } else {
+            self.over = 0;
         }
         let outcome = match pkts.remove(&n) {
             Some(pkt) => {

@@ -64,14 +64,14 @@ lat = {n: r for n, r in peers.items() if any('rtt' in x for x in r)}
 if lat:
     print()
     print(f'--- measured latency (ms, mean over window) ---')
-    print(f'{\"peer\":<18} {\"devin\":>6} {\"ring\":>6} {\"enc\":>6} {\"txpath\":>7} {\"rtt\":>7} {\"jb\":>6} {\"out\":>6} {\"devout\":>7} {\"rxpath\":>7}')
+    print(f'{\"peer\":<18} {\"devin\":>6} {\"ring\":>6} {\"enc\":>6} {\"txpath\":>7} {\"rtt\":>7} {\"jb\":>6} {\"out\":>6} {\"devout\":>7} {\"rxpath\":>7} {\"contr\":>6}')
     agg = {}
     for name, rows in sorted(lat.items()):
         g = lambda k: st.mean([float(r[k]) for r in rows if k in r] or [0.0])
         agg[name] = (g('txpath'), g('rxpath'), g('rtt'))
         print(f'{name:<18} {g(\"devin\"):>6.1f} {g(\"ring\"):>6.2f} {g(\"enc\"):>6.2f} '
               f'{g(\"txpath\"):>7.1f} {g(\"rtt\"):>7.1f} {g(\"jb\"):>6.1f} {g(\"out\"):>6.1f} '
-              f'{g(\"devout\"):>7.1f} {g(\"rxpath\"):>7.1f}')
+              f'{g(\"devout\"):>7.1f} {g(\"rxpath\"):>7.1f} {g(\"contract\"):>6.2f}')
     names = sorted(agg)
     if len(names) == 2:
         a, b = names

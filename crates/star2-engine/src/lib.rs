@@ -39,6 +39,7 @@ const OUT_SHRINK_AFTER_S: u64 = 2;
 
 const MAX_FRAMES: usize = (300 / FRAME_MS) as usize;
 const SHED_MARGIN: usize = (80 / FRAME_MS) as usize;
+const CONTRACT_EVERY: u32 = 1000 / FRAME_MS;
 const JITTER_K: f64 = 3.0;
 const JITTER_MARGIN_MS: f64 = 8.0;
 const RESYNC_CONCEAL: u32 = 500 / FRAME_MS;
@@ -838,6 +839,7 @@ fn playout_loop(
     let mut last_stats = Instant::now();
 
     let (mut win_played, mut win_concealed, mut win_recv) = (0u64, 0u64, 0u64);
+    let mut win_contract = 0u64;
     let (mut win_late, mut win_resync, mut win_expand) = (0u64, 0u64, 0u64);
 
     while !shared.stop.load(Ordering::Relaxed) {
@@ -1002,6 +1004,11 @@ fn playout_loop(
                     dev_out_ms,
                     tx_path_ms: dev_in_ms + in_ring_ms + enc_ms,
                     rx_path_ms: jb_ms + out_ms as f32 + dev_out_ms,
+                    contract_pps: {
+                        let c = dec.contracted - win_contract;
+                        win_contract = dec.contracted;
+                        (c as f64 / secs).round() as u32
+                    },
                     path: path.into(),
                 });
             } else {
@@ -1033,6 +1040,7 @@ fn playout_loop(
                     dev_out_ms,
                     tx_path_ms: dev_in_ms + in_ring_ms + enc_ms,
                     rx_path_ms: 0.0,
+                    contract_pps: 0,
                     path: path.into(),
                 });
             }
