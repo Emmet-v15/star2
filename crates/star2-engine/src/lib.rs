@@ -72,8 +72,6 @@ const P2P_PUNCH_TIMEOUT: Duration = Duration::from_secs(8);
 /// No peer traffic for this long on an established direct path => the call is dead.
 /// Generous because audio itself is the liveness signal and a muted peer still sends.
 const P2P_DIRECT_DEAD: Duration = Duration::from_secs(5);
-/// Wait between punch attempts when both peers are in the room but not connected.
-const P2P_RETRY_COOLDOWN: Duration = Duration::from_secs(6);
 const P2P_MAX_CANDS: usize = 8;
 const P2P_MAX_TXIDS: usize = 256;
 const PKT_BUF: usize = 4096;
@@ -562,9 +560,24 @@ async fn control_loop(
                         }
                     }
                     ServerMsg::P2pOffer { from, nonce, cands } => {
+                        // After a teardown `peer_session` is None and no roster
+                        // event is coming, so requiring a prior pairing here meant
+                        // a perfectly good retry offer was dropped and both sides
+                        // waited forever. Adopt any offer from the other member of
+                        // a two-person room.
+                        let in_room = {
+                            let m = shared.members.lock().unwrap();
+                            m.len() == 2 && m.contains(&from)
+                        };
                         let mut s = shared.p2p.lock().unwrap();
                         if s.peer_session != Some(from) {
-                            continue;
+                            if !in_room {
+                                continue;
+                            }
+                            s.peer_session = Some(from);
+                            if s.local_nonce == 0 {
+                                s.local_nonce = rand_u64();
+                            }
                         }
                         s.remote_nonce = Some(nonce);
                         for c in cands.iter().filter_map(|c| c.parse().ok()) {
@@ -746,7 +759,6 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
 // ---------------------------------------------------------------------------
 
 fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event) + Send + Sync>) {
-    let mut next_retry = Instant::now() + P2P_RETRY_COOLDOWN;
     while !shared.stop.load(Ordering::Relaxed) {
         std::thread::sleep(P2P_PROBE_INTERVAL);
         let me = shared.my_session();
@@ -760,12 +772,12 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     if let Some(p) = peer {
                         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
                     }
-                    // Stay alive and idle: the peer may rejoin, and a fresh roster
-                    // event starts a clean negotiation. Exiting would just make the
-                    // supervisor restart us into the same situation.
-                    go_idle(&shared, "punch timeout");
-                    on_event(Event::Status(
-                        "hole punch failed - no direct path (symmetric NAT/CGNAT?) - waiting".into(),
+                    // FATAL, deliberately. Both peers are still in the room, so no
+                    // roster event is coming to drive another attempt. Exiting lets
+                    // the supervisor restart us into a fresh session, which produces
+                    // exactly those events - the recovery path that already existed.
+                    on_event(Event::Ended(
+                        "hole punch failed - no direct path (symmetric NAT/CGNAT?)".into(),
                     ));
                     continue;
                 }
@@ -785,8 +797,9 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     if let Some(p) = peer {
                         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
                     }
-                    go_idle(&shared, "direct path died");
-                    on_event(Event::Status("peer stopped responding - waiting".into()));
+                    // Also fatal, for the same reason: the peer is still in the
+                    // room, so nothing would ever trigger a fresh negotiation.
+                    on_event(Event::Ended("peer stopped responding".into()));
                     continue;
                 }
                 // Small keepalive probe holds the NAT mapping open when nobody talks.
@@ -795,22 +808,10 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     send_punch(sock, me, PUNCH_PROBE, rn, txid, dst, false);
                 }
             }
-            P2pPhase::Idle | P2pPhase::Failed => {
-                // Both peers are still in the room after a failed punch, so no
-                // further roster event is coming - without this, one timeout means
-                // no call until somebody manually restarts. Retry on a cooldown so
-                // a transient failure (a peer mid-restart, a stale session, a
-                // dropped offer) heals itself.
-                drop(s);
-                if Instant::now() >= next_retry {
-                    let members = shared.members.lock().unwrap().clone();
-                    if members.len() == 2 && members.contains(&me) {
-                        next_retry = Instant::now() + P2P_RETRY_COOLDOWN;
-                        on_event(Event::Status("retrying hole punch".into()));
-                        on_membership(shared, &members, on_event);
-                    }
-                }
-            }
+            // Nothing to do. Recovery is driven by roster events (a peer rejoining)
+            // or, when the pairing itself failed, by the process exiting and the
+            // supervisor restarting it into a clean session. No retry machinery.
+            P2pPhase::Idle | P2pPhase::Failed => {}
         }
     }
 }
