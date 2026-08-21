@@ -1,5 +1,3 @@
-//! star2 - barebones P2P voice call. The CLI is the whole UI.
-
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::time::Duration;
 
@@ -61,7 +59,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    // Stereo carries twice the signal, so give it twice the bits unless told otherwise.
+
     cfg.bitrate = bitrate.unwrap_or(if cfg.stereo { 256_000 } else { 128_000 });
     if cfg.name == "anon" {
         if let Ok(h) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
@@ -79,7 +77,6 @@ fn main() -> Result<()> {
         cfg.bitrate / 1000
     );
 
-    // The engine calls us from its own threads; funnel events onto this one.
     let (tx, rx) = channel();
     let _call = start_call(cfg, move |e| {
         let _ = tx.send(e);

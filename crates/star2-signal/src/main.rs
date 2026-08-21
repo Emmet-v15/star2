@@ -1,13 +1,3 @@
-//! star2 signal server - rendezvous only. Audio never touches this process.
-//!
-//! Two jobs:
-//!   1. **WebSocket rendezvous**: room membership, and forwarding P2P offer/answer/
-//!      candidate/abort between the two members of a room.
-//!   2. **UDP reflexive responder**: answers `flags::REFLEX` probes with the source
-//!      address it observed, so a client learns its own NAT mapping (mini-STUN).
-//!
-//! Deliberately not here: media forwarding, auth beyond a shared token, persistence.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,7 +12,6 @@ use star2_proto::{flags, ClientMsg, MediaHeader, Member, ServerMsg, SessionId, M
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-/// One connected client.
 struct Session {
     name: String,
     room: Option<String>,
@@ -31,7 +20,7 @@ struct Session {
 
 struct Hub {
     sessions: HashMap<SessionId, Session>,
-    /// room -> members. A room is dropped when its last member leaves.
+
     rooms: HashMap<String, Vec<SessionId>>,
 }
 
@@ -39,22 +28,20 @@ struct App {
     hub: Mutex<Hub>,
     next_session: AtomicU32,
     token: String,
-    /// The public `host:port` clients should send REFLEX probes to.
+
     reflex: String,
-    /// Connected updaters waiting to be told a new build exists. These are NOT call
-    /// sessions - they hold no room and never touch media.
+
     updates: Mutex<Vec<UnboundedSender<String>>>,
 }
 
 impl App {
-    /// Send to one session, if it still exists.
+
     fn send(hub: &Hub, to: SessionId, msg: ServerMsg) {
         if let Some(s) = hub.sessions.get(&to) {
             let _ = s.tx.send(msg);
         }
     }
 
-    /// Send to everyone in `room` except `except`.
     fn broadcast(hub: &Hub, room: &str, except: SessionId, msg: &ServerMsg) {
         let Some(members) = hub.rooms.get(room) else { return };
         for &m in members.iter().filter(|&&m| m != except) {
@@ -62,7 +49,6 @@ impl App {
         }
     }
 
-    /// Remove `id` from whatever room it is in, telling the room it left.
     fn leave_room(hub: &mut Hub, id: SessionId) {
         let Some(room) = hub.sessions.get_mut(&id).and_then(|s| s.room.take()) else { return };
         if let Some(members) = hub.rooms.get_mut(&room) {
@@ -90,14 +76,13 @@ async fn main() -> anyhow::Result<()> {
         updates: Mutex::new(Vec::new()),
     });
 
-    // --- UDP reflexive responder (our mini-STUN) ---
     let sock = UdpSocket::bind(&udp_bind).await?;
     eprintln!("[signal] reflex udp on {udp_bind} (advertising {reflex})");
     tokio::spawn(async move {
         let mut buf = [0u8; 2048];
         loop {
             let Ok((n, src)) = sock.recv_from(&mut buf).await else { continue };
-            // Only answer well-formed REFLEX probes; ignore anything else that lands here.
+
             let Some(h) = MediaHeader::decode(&buf[..n]) else { continue };
             if !h.is_reflex() {
                 continue;
@@ -111,7 +96,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // --- WebSocket rendezvous ---
     let router = axum::Router::new()
         .route("/", get(ws_handler))
         .route("/updates", get(updates_handler))
@@ -131,15 +115,6 @@ async fn ws_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl I
     ws.on_upgrade(move |sock| client_conn(sock, app))
 }
 
-// ---------------------------------------------------------------------------
-// Update notification plane
-// ---------------------------------------------------------------------------
-// Deliberately dumb: the server never stores or serves a build, it only says
-// "go look again". The updater fetches the manifest from v15.studio and decides
-// for itself, so a malicious or confused nudge can't point anyone at a binary.
-
-/// `GET /updates` - an updater parks here waiting for a nudge. No auth: the only
-/// thing it can learn is that a build happened.
 async fn updates_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> impl IntoResponse {
     ws.on_upgrade(move |sock| updater_conn(sock, app))
 }
@@ -157,16 +132,14 @@ async fn updater_conn(sock: WebSocket, app: Arc<App>) {
             }
         }
     });
-    // We expect nothing from an updater; this just waits for the socket to close.
+
     while let Some(Ok(_)) = inc.next().await {}
     writer.abort();
-    // Drop closed senders: this is the only place the list is pruned.
+
     app.updates.lock().unwrap().retain(|t| !t.is_closed());
     eprintln!("[signal] updater gone ({} left)", app.updates.lock().unwrap().len());
 }
 
-/// `POST /notify` with header `x-token: <token>` - tell every updater to re-check.
-/// Called by `deploy/publish-client.sh` right after a successful upload.
 async fn notify_handler(
     State(app): State<Arc<App>>,
     headers: axum::http::HeaderMap,
@@ -184,27 +157,18 @@ async fn notify_handler(
     (axum::http::StatusCode::OK, format!("notified {n}\n"))
 }
 
-/// How often we ping an idle client. Any frame back - including the Pong the
-/// client's stack sends automatically - counts as liveness.
 const PING_EVERY: Duration = Duration::from_secs(10);
-/// Drop a session that has sent us nothing at all for this long. A client that
-/// vanished without a clean close generates no RST, so `inc.next()` blocks
-/// forever while its session keeps holding a slot in the room - ghosts were
-/// observed lingering seven minutes, telling live clients the room was full.
+
 const DEAD_AFTER: Duration = Duration::from_secs(30);
 
 async fn client_conn(sock: WebSocket, app: Arc<App>) {
     let (mut out, mut inc) = sock.split();
     let (tx, mut rx) = unbounded_channel::<ServerMsg>();
 
-    // Pump queued ServerMsgs to the socket on their own task, so a slow client can
-    // never block the hub lock held by whoever is broadcasting to it. It also owns
-    // the ping ticker - a client in an empty room is otherwise completely silent,
-    // and silence is exactly the case we need to probe.
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ping.tick().await; // the first tick is immediate; we want the first *gap*
+        ping.tick().await;
         loop {
             let sent = tokio::select! {
                 m = rx.recv() => {
@@ -220,11 +184,9 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         }
     });
 
-    // --- Handshake: the first message must be a valid Hello ---
     let mut id: Option<SessionId> = None;
     loop {
-        // Non-Text frames (notably the Pong answering our Ping) fall through to
-        // `continue` below, but arriving at all is what resets this timeout.
+
         let Ok(next) = tokio::time::timeout(DEAD_AFTER, inc.next()).await else {
             match id {
                 Some(me) => eprintln!("[signal] session {me} timed out"),
@@ -236,7 +198,6 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         let Message::Text(txt) = msg else { continue };
         let Ok(cm) = serde_json::from_str::<ClientMsg>(&txt) else { continue };
 
-        // Everything before a successful Hello is rejected.
         let Some(me) = id else {
             match cm {
                 ClientMsg::Hello { name, ver, token } => {
@@ -268,7 +229,6 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         handle(&app, me, cm);
     }
 
-    // --- Teardown ---
     if let Some(me) = id {
         let mut hub = app.hub.lock().unwrap();
         App::leave_room(&mut hub, me);
@@ -278,11 +238,10 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
     writer.abort();
 }
 
-/// Handle one post-handshake message from session `me`.
 fn handle(app: &App, me: SessionId, cm: ClientMsg) {
     let mut hub = app.hub.lock().unwrap();
     match cm {
-        ClientMsg::Hello { .. } => {} // already said hello; ignore
+        ClientMsg::Hello { .. } => {}
         ClientMsg::Join { room } => {
             App::leave_room(&mut hub, me);
             hub.rooms.entry(room.clone()).or_default().push(me);
@@ -291,7 +250,7 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             }
             let name = hub.sessions.get(&me).map(|s| s.name.clone()).unwrap_or_default();
             App::broadcast(&hub, &room, me, &ServerMsg::Joined { session: me, name });
-            // Roster snapshot back to the joiner, so it sees whoever was already here.
+
             let members = hub
                 .rooms
                 .get(&room)
@@ -306,8 +265,7 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             App::send(&hub, me, ServerMsg::Room { room, members });
         }
         ClientMsg::Leave => App::leave_room(&mut hub, me),
-        // Diagnostics only - log and drop. Tagged with the name so two peers in a
-        // call can be told apart in journalctl.
+
         ClientMsg::Stats {
             loss_pct,
             jitter_ms,
@@ -323,8 +281,7 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             path,
         } => {
             let name = hub.sessions.get(&me).map(|s| s.name.as_str()).unwrap_or("?");
-            // tx/mic first: they are the half that was missing, and a one-way call
-            // shows up here as tx=0 or mic=-99 while everything else looks fine.
+
             eprintln!(
                 "[stats] {name}(s{me}) path={path} tx={tx_pps}/s mic={mic_db:.0}dB \
                  rx={rx_pps}/s play={play_fps}/s loss={loss_pct:.1}% late={late_pps}/s \
@@ -332,7 +289,7 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
                  buf={buf_ms}ms out={out_ms}ms"
             );
         }
-        // P2P signaling: forward verbatim, stamping `from`, but only within a room.
+
         ClientMsg::P2pOffer { to, nonce, cands } => {
             forward(&hub, me, to, ServerMsg::P2pOffer { from: me, nonce, cands })
         }
@@ -346,8 +303,6 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
     }
 }
 
-/// Deliver a P2P message only if both sessions are in the same room - otherwise any
-/// client could spray offers (and punch nonces) at strangers.
 fn forward(hub: &Hub, from: SessionId, to: SessionId, msg: ServerMsg) {
     let room_of = |id: SessionId| hub.sessions.get(&id).and_then(|s| s.room.clone());
     if room_of(from).is_some() && room_of(from) == room_of(to) {
