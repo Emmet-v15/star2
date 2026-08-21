@@ -682,7 +682,18 @@ fn on_membership(
         }
     } else if members.len() > 2 {
         // This is a 1:1 program; a third party would need a mixer we don't have.
-        on_event(Event::Ended("room has more than 2 members".into()));
+        // But NOT fatal - it is a room state to wait out, not an error.
+        //
+        // Exiting here was self-sustaining: the supervisor restarted us, the
+        // restart added another session, sessions overlap while the server is
+        // still reaping the closed ones, so the room stayed above two and we
+        // exited again. Ten restarts in seventeen seconds, caused entirely by
+        // reacting to the condition our own reaction created.
+        go_idle(shared, "room has more than 2 members");
+        on_event(Event::Status(format!(
+            "room has {} members - 1:1 only, waiting for it to clear",
+            members.len()
+        )));
     }
 }
 

@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
@@ -80,29 +80,29 @@ async fn main() -> Result<()> {
     }
 
     // Still not fatal if it won't start: the next check may well fix it.
-    let mut child = spawn_or_warn(&exe, &args);
+    let mut sup = Supervisor::new(&exe, &args);
 
     loop {
         // Connect, then serve nudges until the socket dies. A check runs on connect
         // too, which covers the case where a build landed while we were offline.
-        if let Err(e) = run_session(&exe, &args, &mut child).await {
+        if let Err(e) = run_session(&exe, &args, &mut sup).await {
             eprintln!("  updater: {e}");
         }
         // Supervise across the reconnect gap so a dead child isn't left dead.
-        supervise(&exe, &args, &mut child, RECONNECT_DELAY);
+        supervise(&exe, &args, &mut sup, RECONNECT_DELAY);
     }
 }
 
 /// Hold the update socket, checking on connect and on every nudge, while keeping
 /// the child alive. Returns when the socket closes.
-async fn run_session(exe: &Path, args: &[String], child: &mut Option<Child>) -> Result<()> {
+async fn run_session(exe: &Path, args: &[String], sup: &mut Supervisor) -> Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(UPDATES_WS)
         .await
         .context("connect to update channel")?;
     println!("  update channel connected");
     let (_tx, mut rx) = ws.split();
 
-    check_and_apply(exe, args, child).await;
+    check_and_apply(exe, args, sup).await;
 
     // Interval, not sleep: `select!` cancels the losing branches on every iteration,
     // so a `sleep` here would be restarted each time round and never fire.
@@ -114,13 +114,13 @@ async fn run_session(exe: &Path, args: &[String], child: &mut Option<Child>) -> 
             msg = rx.next() => match msg {
                 Some(Ok(_)) => {
                     println!("  update announced");
-                    check_and_apply(exe, args, child).await;
+                    check_and_apply(exe, args, sup).await;
                 }
                 _ => return Ok(()), // closed or errored; caller reconnects
             },
             // Process supervision only - restart the child if it died on its own.
             // This never touches the network.
-            _ = live.tick() => ensure_running(exe, args, child),
+            _ = live.tick() => sup.ensure_running(exe, args),
         }
     }
 }
@@ -165,7 +165,7 @@ async fn install(exe: &Path, m: &Manifest) {
 /// Stop before swapping. Windows would allow renaming the running image out of the
 /// way, but killing first means the file is untouched by anyone when we replace it,
 /// which is one less thing to be subtle about.
-async fn check_and_apply(exe: &Path, args: &[String], child: &mut Option<Child>) {
+async fn check_and_apply(exe: &Path, args: &[String], sup: &mut Supervisor) {
     let Some(manifest) = stale_manifest(exe).await else { return };
     println!("  downloading build {}", manifest.version);
 
@@ -181,12 +181,8 @@ async fn check_and_apply(exe: &Path, args: &[String], child: &mut Option<Child>)
     };
 
     // Only now stop the engine: from here it is a rename and a relaunch.
-    if let Some(c) = child.as_mut() {
-        println!("  stopping engine to swap in {}", manifest.version);
-        let _ = c.kill();
-        let _ = c.wait();
-    }
-    *child = None;
+    println!("  stopping engine to swap in {}", manifest.version);
+    sup.stop();
 
     if let Err(e) = swap(exe, &staged) {
         eprintln!("  install failed: {e}");
@@ -194,7 +190,7 @@ async fn check_and_apply(exe: &Path, args: &[String], child: &mut Option<Child>)
         println!("  now on {}", manifest.version);
     }
     // Same `args` the user launched us with - so it rejoins the same room.
-    *child = spawn_or_warn(exe, args);
+    sup.start_now(exe, args);
 }
 
 /// Download, verify, and move into place. The download lands beside the target so
@@ -281,24 +277,89 @@ fn spawn_or_warn(exe: &Path, args: &[String]) -> Option<Child> {
     }
 }
 
-/// Restart the child if it exited, or start it if we never managed to.
-fn ensure_running(exe: &Path, args: &[String], child: &mut Option<Child>) {
-    match child {
-        Some(c) => {
-            if let Ok(Some(status)) = c.try_wait() {
-                println!("  star2-engine exited ({status}) - restarting");
-                *child = spawn_or_warn(exe, args);
+/// Restart bookkeeping.
+///
+/// A crash-looping engine must NOT be respawned flat out. Restarting instantly
+/// turned a transient room condition into ten restarts in seventeen seconds -
+/// and because each restart opened a new session, the restarts were themselves
+/// what kept the condition true. Backoff bounds any such loop regardless of what
+/// causes it, which is the point: the supervisor should not be able to amplify a
+/// fault it cannot understand.
+struct Supervisor {
+    child: Option<Child>,
+    /// Earliest we may spawn again.
+    next_spawn: Instant,
+    /// Current delay; doubles on each rapid exit, resets after a healthy run.
+    backoff: Duration,
+    /// When the current child started - distinguishes a crash-loop from someone
+    /// simply hanging up after an hour.
+    started: Instant,
+}
+
+const RESTART_MIN: Duration = Duration::from_millis(500);
+const RESTART_MAX: Duration = Duration::from_secs(30);
+/// A child that ran at least this long counts as healthy; its exit is not a crash.
+const HEALTHY_RUN: Duration = Duration::from_secs(20);
+
+impl Supervisor {
+    fn new(exe: &Path, args: &[String]) -> Self {
+        Self {
+            child: spawn_or_warn(exe, args),
+            next_spawn: Instant::now(),
+            backoff: RESTART_MIN,
+            started: Instant::now(),
+        }
+    }
+
+    /// Restart the child if it exited, or start it if we never managed to.
+    fn ensure_running(&mut self, exe: &Path, args: &[String]) {
+        if let Some(c) = self.child.as_mut() {
+            match c.try_wait() {
+                Ok(Some(status)) => {
+                    if self.started.elapsed() >= HEALTHY_RUN {
+                        self.backoff = RESTART_MIN; // it was fine; not a loop
+                    } else {
+                        self.backoff = (self.backoff * 2).min(RESTART_MAX);
+                    }
+                    self.next_spawn = Instant::now() + self.backoff;
+                    println!(
+                        "  star2-engine exited ({status}) - restarting in {:.1}s",
+                        self.backoff.as_secs_f32()
+                    );
+                    self.child = None;
+                }
+                _ => return, // still running
             }
         }
-        None => *child = spawn_or_warn(exe, args),
+        if self.child.is_none() && Instant::now() >= self.next_spawn {
+            self.child = spawn_or_warn(exe, args);
+            self.started = Instant::now();
+        }
+    }
+
+    /// Stop the child so its binary can be replaced.
+    fn stop(&mut self) {
+        if let Some(c) = self.child.as_mut() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        self.child = None;
+    }
+
+    /// Start immediately after an update - an update is not a crash.
+    fn start_now(&mut self, exe: &Path, args: &[String]) {
+        self.backoff = RESTART_MIN;
+        self.next_spawn = Instant::now();
+        self.child = spawn_or_warn(exe, args);
+        self.started = Instant::now();
     }
 }
 
 /// Keep the child alive for `dur` while we wait to reconnect.
-fn supervise(exe: &Path, args: &[String], child: &mut Option<Child>, dur: Duration) {
-    let deadline = std::time::Instant::now() + dur;
-    while std::time::Instant::now() < deadline {
-        ensure_running(exe, args, child);
-        std::thread::sleep(Duration::from_millis(500));
+fn supervise(exe: &Path, args: &[String], sup: &mut Supervisor, dur: Duration) {
+    let deadline = Instant::now() + dur;
+    while Instant::now() < deadline {
+        sup.ensure_running(exe, args);
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
