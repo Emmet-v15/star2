@@ -21,7 +21,18 @@ futures-util = { workspace = true }
 serde_json = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
-# Windows' default timer granularity is ~15.6 ms - far coarser than our 5 ms frame,
-# which makes every short sleep overshoot and the output ring under-run.
+# Non-Windows: plain IP_TOS works, so socket2 is all we need for DSCP.
+[target.'cfg(not(windows))'.dependencies]
+socket2 = "0.5"
+
+# Windows needs the `windows` crate twice over:
+#   Win32_Media                    - timeBeginPeriod (timer granularity)
+#   Win32_NetworkManagement_QoS    - qWAVE, the ONLY way to set DSCP on Windows
+#                                    (setsockopt(IP_TOS) is ignored since XP SP2)
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media"] }
+windows = { version = "0.62", features = [
+    "Win32_Media",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_QoS",
+    "Win32_Networking_WinSock",
+] }

@@ -50,7 +50,26 @@ controller, so glare can't happen.
 | `--bitrate` | 128k mono / 256k stereo | Opus bitrate |
 | `--input` / `--output` | system default | device name substring |
 | `--dev-buf <MS>` | 0 (device default) | device buffer request; lower = less latency |
+| `--stats` | off | 1 Hz `rtt / jitter / buf / loss / out / rx / play` readout |
 | `--list-devices` | | print devices and exit |
+
+`--stats` is the diagnostic tool: `rx` and `play` should both sit at 200/s. A gap
+between them, or either falling short of 200, says the fault is local (a starved
+thread) rather than the network.
+
+## Path QoS
+
+Media is marked DSCP **EF** (46) so WMM access points put it in the voice class,
+which attacks local queueing jitter — and jitter is what sets our buffer depth.
+
+The implementation is split because `setsockopt(IP_TOS)` is **silently ignored on
+Windows** (since XP SP2). Unix marks the socket once at bind; Windows must use
+qWAVE, which needs a destination address, so it can only mark once the punch has
+confirmed where the peer is. A `[qos]` line reports which happened.
+
+This only affects the first and last hop. ISPs rewrite or ignore DSCP at the edge,
+so it does nothing for transit jitter — for a long path, bufferbloat (SQM/`cake`)
+on both routers is the far bigger lever.
 
 ## Latency
 

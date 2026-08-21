@@ -25,14 +25,15 @@ use futures_util::{SinkExt, StreamExt};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 use star2_proto::{
-    flags, ClientMsg, MediaHeader, ServerMsg, SessionId, MEDIA_HEADER_LEN, PROTO_VERSION,
-    PUNCH_PROBE,
+    flags, ClientMsg, MediaHeader, PingProbe, ServerMsg, SessionId, MEDIA_HEADER_LEN,
+    PING_PAYLOAD_LEN, PING_REPLY, PING_REQUEST, PROTO_VERSION, PUNCH_PROBE,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 mod audio;
 mod p2p;
 mod playout;
+mod qos;
 
 use audio::{buffer_size_for, pick_config, pick_device, Resampler};
 use p2p::*;
@@ -146,7 +147,16 @@ pub enum Event {
     /// Periodic 1 Hz readout while a call is live. `rx_pps` / `play_fps` should both
     /// sit at 1000/FRAME_MS (200); a gap between them is the loss, and which one is
     /// wrong says whether the sender or the playout clock is at fault.
-    Stats { jitter_ms: f64, target_ms: f64, loss_pct: f32, out_ms: f64, rx_pps: u64, play_fps: u64 },
+    Stats {
+        jitter_ms: f64,
+        target_ms: f64,
+        loss_pct: f32,
+        out_ms: f64,
+        rx_pps: u64,
+        play_fps: u64,
+        /// Peer round-trip; `None` until the first reply comes back.
+        rtt_ms: Option<f64>,
+    },
 }
 
 /// Owns the running call. Dropping it stops every thread.
@@ -189,7 +199,16 @@ struct Shared {
     route: MediaRoute,
     /// Queue of signaling messages for the control loop to send.
     ctrl_tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
+    /// Last measured peer round-trip, microseconds. 0 until the first reply.
+    rtt_us: AtomicU64,
     stop: Arc<AtomicBool>,
+}
+
+/// Monotonic microseconds. Only ever compared against our own earlier readings,
+/// so the epoch is irrelevant and the two peers need no shared clock.
+fn now_us() -> u64 {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 impl Shared {
@@ -221,6 +240,7 @@ where
     //    sends through.
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_read_timeout(Some(Duration::from_millis(100)))?;
+    qos::mark_socket(&sock); // DSCP EF where the OS honours it at bind time
     let local_port = sock.local_addr()?.port();
 
     let shared = Arc::new(Shared {
@@ -230,6 +250,7 @@ where
         p2p: Mutex::new(P2pState::new()),
         route: MediaRoute { dst: Mutex::new(None), allowed: Mutex::new(HashSet::new()) },
         ctrl_tx: Mutex::new(None),
+        rtt_us: AtomicU64::new(0),
         stop: stop.clone(),
     });
 
@@ -644,6 +665,31 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             continue;
         }
 
+        // RTT probe. Only honoured from the confirmed peer, so it can't be used by a
+        // stranger to make us emit traffic (a trivial amplification vector otherwise).
+        if h.is_ping() {
+            if !shared.route.allowed.lock().unwrap().contains(&src) {
+                continue;
+            }
+            if let Some(p) = PingProbe::decode(payload) {
+                match p.kind {
+                    PING_REQUEST => {
+                        // Echo it back untouched; only the originator reads sent_us.
+                        let mut dg = [0u8; MEDIA_HEADER_LEN + PING_PAYLOAD_LEN];
+                        MediaHeader::new(shared.my_session(), 0, 0, flags::PING | flags::KEEPALIVE)
+                            .encode(&mut dg[..MEDIA_HEADER_LEN]);
+                        PingProbe { kind: PING_REPLY, ..p }.encode(&mut dg[MEDIA_HEADER_LEN..]);
+                        let _ = sock.send_to(&dg, src);
+                    }
+                    PING_REPLY => {
+                        shared.rtt_us.store(now_us().saturating_sub(p.sent_us), Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         // Punch probes authorize themselves by nonce, so they're handled before the
         // source allowlist - that allowlist is what they exist to populate.
         if h.is_punch() {
@@ -651,6 +697,9 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             if let Some(peer) =
                 handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, h.session, payload)
             {
+                // Now that the peer address is confirmed, Windows can finally mark
+                // the flow - qWAVE needs a destination, unlike Unix's IP_TOS.
+                qos::mark_peer_flow(sock, peer);
                 on_event(Event::Direct(peer));
             }
             continue;
@@ -687,6 +736,7 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
 // ---------------------------------------------------------------------------
 
 fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event) + Send + Sync>) {
+    let mut ping_tick = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
         std::thread::sleep(P2P_PROBE_INTERVAL);
         let me = shared.my_session();
@@ -728,6 +778,16 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                 if let (Some(rn), Some(dst)) = (s.remote_nonce, *shared.route.dst.lock().unwrap()) {
                     let txid = s.new_txid();
                     send_punch(sock, me, PUNCH_PROBE, rn, txid, dst, false);
+                    // RTT probe once a second (every 5th 200 ms tick).
+                    ping_tick = (ping_tick + 1) % 5;
+                    if ping_tick == 0 {
+                        let mut dg = [0u8; MEDIA_HEADER_LEN + PING_PAYLOAD_LEN];
+                        MediaHeader::new(me, 0, 0, flags::PING | flags::KEEPALIVE)
+                            .encode(&mut dg[..MEDIA_HEADER_LEN]);
+                        PingProbe { kind: PING_REQUEST, sent_us: now_us() }
+                            .encode(&mut dg[MEDIA_HEADER_LEN..]);
+                        let _ = sock.send_to(&dg, dst);
+                    }
                 }
             }
             P2pPhase::Idle | P2pPhase::Failed => {}
@@ -923,6 +983,10 @@ fn playout_loop(
                         * FRAME_MS as f64,
                     rx_pps: (rx as f64 / secs).round() as u64,
                     play_fps: (played as f64 / secs).round() as u64,
+                    rtt_ms: match shared.rtt_us.load(Ordering::Relaxed) {
+                        0 => None,
+                        us => Some(us as f64 / 1000.0),
+                    },
                 });
             }
         }

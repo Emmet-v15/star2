@@ -28,6 +28,9 @@ pub mod flags {
     pub const REFLEX: u8 = 0b0000_0001;
     /// No audio payload - NAT keepalive only. Never forwarded, never played.
     pub const KEEPALIVE: u8 = 0b0000_1000;
+    /// Media-plane RTT probe/reply. Peer bounces a request straight back.
+    /// Always OR'd with [`KEEPALIVE`] so it can never reach the playout path.
+    pub const PING: u8 = 0b0000_0010;
     /// Audio payload has 2 interleaved channels (clear = 1 / mono); the receiver
     /// sizes its decoder from this, so mono and stereo peers interoperate.
     pub const STEREO: u8 = 0b0100_0000;
@@ -151,6 +154,9 @@ impl MediaHeader {
     pub fn is_punch(&self) -> bool {
         self.flags & flags::PUNCH != 0
     }
+    pub fn is_ping(&self) -> bool {
+        self.flags & flags::PING != 0
+    }
     pub fn is_reflex(&self) -> bool {
         self.flags & flags::REFLEX != 0
     }
@@ -203,6 +209,39 @@ impl PunchProbe {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Media-plane RTT probe (flags `PING | KEEPALIVE`)
+// ---------------------------------------------------------------------------
+
+pub const PING_PAYLOAD_LEN: usize = 1 + 8; // kind | sent_us_le
+pub const PING_REQUEST: u8 = 0;
+pub const PING_REPLY: u8 = 1;
+
+/// `sent_us` is the sender's own microsecond clock, echoed back untouched, so only
+/// the sender ever interprets it - the two peers need no clock synchronisation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingProbe {
+    pub kind: u8, // PING_REQUEST | PING_REPLY
+    pub sent_us: u64,
+}
+
+impl PingProbe {
+    /// Write the probe into the first [`PING_PAYLOAD_LEN`] bytes of `buf`.
+    pub fn encode(&self, buf: &mut [u8]) {
+        assert!(buf.len() >= PING_PAYLOAD_LEN, "buffer too small for ping probe");
+        buf[0] = self.kind;
+        buf[1..9].copy_from_slice(&self.sent_us.to_le_bytes());
+    }
+
+    /// Parse a probe, or `None` if too short.
+    pub fn decode(p: &[u8]) -> Option<Self> {
+        if p.len() < PING_PAYLOAD_LEN {
+            return None;
+        }
+        Some(Self { kind: p[0], sent_us: u64::from_le_bytes(p[1..9].try_into().ok()?) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +285,22 @@ mod tests {
         let mut bad = buf;
         bad[0] = b'X';
         assert!(PunchProbe::decode(&bad).is_none());
+    }
+
+    #[test]
+    fn ping_roundtrip() {
+        let p = PingProbe { kind: PING_REQUEST, sent_us: 1_234_567_890 };
+        let mut buf = [0u8; PING_PAYLOAD_LEN];
+        p.encode(&mut buf);
+        assert_eq!(PingProbe::decode(&buf), Some(p));
+    }
+
+    /// PING must never be mistaken for audio: it always rides with KEEPALIVE.
+    #[test]
+    fn ping_flag_distinct_from_audio() {
+        let h = MediaHeader::new(1, 0, 0, flags::PING | flags::KEEPALIVE);
+        assert!(h.is_ping() && h.is_keepalive());
+        assert!(!h.is_punch() && !h.is_reflex());
     }
 
     #[test]

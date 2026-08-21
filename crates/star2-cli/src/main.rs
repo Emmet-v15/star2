@@ -85,9 +85,10 @@ fn main() -> Result<()> {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Event::Status(s)) => println!("  {s}"),
             Ok(Event::Direct(addr)) => println!("  direct path up: {addr}"),
-            Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms, rx_pps, play_fps }) => {
+            Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms, rx_pps, play_fps, rtt_ms }) => {
                 if stats {
-                    println!("  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms  rx {rx_pps}/s  play {play_fps}/s");
+                    let rtt = rtt_ms.map(|r| format!("{r:.0}ms")).unwrap_or_else(|| "-".into());
+                    println!("  rtt {rtt}  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms  rx {rx_pps}/s  play {play_fps}/s");
                 }
             }
             Ok(Event::Ended(why)) => {
