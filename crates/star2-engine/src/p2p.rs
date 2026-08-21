@@ -145,7 +145,7 @@ pub(crate) fn handle_punch(
                 route.allowed.lock().unwrap().insert(src);
                 *route.dst.lock().unwrap() = Some(src);
                 s.phase = P2pPhase::Direct;
-                log_line(format!("[p2p] direct up -> {src} ({}ms)", s.started.elapsed().as_millis()));
+                log_line(format!("[engine] connected - direct path to {src} ({}ms)", s.started.elapsed().as_millis()));
                 return Some(src);
             }
             None
@@ -158,7 +158,7 @@ pub(crate) fn p2p_fail(s: &mut P2pState, route: &MediaRoute, why: &str) {
     s.phase = P2pPhase::Failed;
     *route.dst.lock().unwrap() = None;
     route.allowed.lock().unwrap().clear();
-    log_line(format!("[p2p] failed: {why}"));
+    log_line(format!("[engine] direct path failed: {why}"));
 }
 
 pub(crate) fn p2p_teardown(p2p: &Mutex<P2pState>, route: &MediaRoute, why: &str) {
@@ -169,7 +169,7 @@ pub(crate) fn p2p_teardown(p2p: &Mutex<P2pState>, route: &MediaRoute, why: &str)
     s.my_cands = my_cands;
     *route.dst.lock().unwrap() = None;
     route.allowed.lock().unwrap().clear();
-    log_line(format!("[p2p] teardown ({why})"));
+    super::debug_line(format!("[engine] direct path torn down ({why})"));
 }
 
 #[cfg(test)]

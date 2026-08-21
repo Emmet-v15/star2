@@ -49,6 +49,8 @@ const JB_DECAY_EVERY: u32 = 256;
 const JB_PCTILE: f64 = 0.97;
 const SPIKE_MULT: f64 = 3.0;
 const SPIKE_MAX_MS: f64 = 400.0;
+const SIGNAL_RETRY: Duration = Duration::from_secs(3);
+const DIRECT_GRACE: Duration = Duration::from_secs(3);
 const SPIKE_DECAY: f64 = 0.985;
 
 const P2P_PROBE_INTERVAL: Duration = Duration::from_millis(200);
@@ -59,8 +61,21 @@ const P2P_MAX_CANDS: usize = 8;
 const P2P_MAX_TXIDS: usize = 256;
 const PKT_BUF: usize = 4096;
 
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+static SIGNAL_DOWN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
 pub fn log_line(line: String) {
     eprintln!("{line}");
+}
+
+fn debug_line(line: String) {
+    if VERBOSE.load(Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
 }
 
 #[cfg(windows)]
@@ -230,7 +245,7 @@ where
     let output = pick_device(&host, &cfg.output, false)?;
     let in_cfg = pick_config(&input, true)?;
     let out_cfg = pick_config(&output, false)?;
-    log_line(format!(
+    debug_line(format!(
         "[engine] audio in={}Hz {}ch {:?} / out={}Hz {}ch {:?}",
         in_cfg.sample_rate().0,
         in_cfg.channels(),
@@ -262,7 +277,7 @@ where
 
     let err_fn = |e| log_line(format!("[engine] audio stream error: {e}"));
     if in_rate != SR {
-        log_line(format!("[engine] resampling mic {in_rate}Hz -> {SR}Hz"));
+        debug_line(format!("[engine] resampling mic {in_rate}Hz -> {SR}Hz"));
     }
 
     let in_stream = {
@@ -365,18 +380,30 @@ where
                     return;
                 }
             };
-            if let Err(e) = rt.block_on(control_loop(&cfg, &shared, &sock, local_port, &on_event)) {
+            loop {
+                if shared.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Err(e) = rt.block_on(control_loop(&cfg, &shared, &sock, local_port, &on_event))
+                else {
+                    return;
+                };
                 if shared.stop.load(Ordering::Relaxed) {
                     return;
                 }
 
-                if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
-                    on_event(Event::Status(format!(
-                        "signalling lost ({e}) - call continues on the direct path"
-                    )));
-                } else {
-                    on_event(Event::Ended(format!("signaling: {e}")));
+                if !SIGNAL_DOWN.swap(true, Ordering::Relaxed) {
+                    if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
+                        on_event(Event::Status(
+                            "signal server unreachable - call unaffected, retrying".into(),
+                        ));
+                    } else {
+                        on_event(Event::Status(format!(
+                            "signal server unreachable ({e}) - retrying"
+                        )));
+                    }
                 }
+                std::thread::sleep(SIGNAL_RETRY);
             }
         })?
     });
@@ -433,6 +460,9 @@ async fn control_loop(
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (ws, _) = tokio_tungstenite::connect_async(&cfg.url).await.context("connect")?;
+    if SIGNAL_DOWN.swap(false, Ordering::Relaxed) {
+        on_event(Event::Status("signal server back".into()));
+    }
     let (mut tx_ws, mut rx_ws) = ws.split();
     let (tx, mut rx) = unbounded_channel::<ClientMsg>();
     *shared.ctrl_tx.lock().unwrap() = Some(tx.clone());
@@ -463,7 +493,7 @@ async fn control_loop(
                 match sm {
                     ServerMsg::Welcome { session, reflex } => {
                         *shared.session.lock().unwrap() = Some(session);
-                        on_event(Event::Status(format!("session {session}, reflex via {reflex}")));
+                        debug_line(format!("[engine] session {session}, reflex via {reflex}"));
 
                         discover_reflex(shared, sock, &reflex, session).await;
                         let mut cands = Vec::new();
@@ -476,16 +506,16 @@ async fn control_loop(
                         if cands.is_empty() {
                             bail!("no usable candidates (no reflexive address, no LAN address)");
                         }
-                        on_event(Event::Status(format!("candidates: {}", cands.join(", "))));
+                        debug_line(format!("[engine] candidates: {}", cands.join(", ")));
                         shared.p2p.lock().unwrap().my_cands = cands;
                         tx.send(ClientMsg::Join { room: cfg.room_token.clone() })?;
                         joined = true;
                     }
                     ServerMsg::Room { room, members } => {
                         on_event(Event::Status(if members.len() < 2 {
-                            format!("in room {room:?} alone - waiting for your peer to join the same room")
+                            format!("waiting for your peer to join {room}")
                         } else {
-                            format!("room {room:?}: {} members", members.len())
+                            format!("peer already in {room} - connecting")
                         }));
                         let ids: HashSet<SessionId> = members.iter().map(|m| m.session).collect();
                         on_membership(shared, &ids, on_event);
@@ -551,7 +581,7 @@ async fn control_loop(
                         let (my_nonce, my_cands) = (s.local_nonce, s.my_cands.clone());
                         drop(s);
                         tx.send(ClientMsg::P2pAnswer { to: from, nonce: my_nonce, cands: my_cands })?;
-                        on_event(Event::Status("punching (answered offer)".into()));
+                        debug_line("[engine] punching (answered offer)".into());
                     }
                     ServerMsg::P2pAnswer { from, nonce, cands } => {
                         let mut s = shared.p2p.lock().unwrap();
@@ -622,6 +652,10 @@ fn on_membership(
         if s.peer_session == Some(peer) {
             return;
         }
+        if s.phase == P2pPhase::Direct && s.last_peer_rx.elapsed() < DIRECT_GRACE {
+            s.peer_session = Some(peer);
+            return;
+        }
 
         let my_cands = s.my_cands.clone();
         *s = P2pState::new();
@@ -636,7 +670,7 @@ fn on_membership(
             let nonce = s.local_nonce;
             drop(s);
             shared.send_ctrl(ClientMsg::P2pOffer { to: peer, nonce, cands: my_cands });
-            on_event(Event::Status(format!("punching peer {peer} (controller)")));
+            debug_line(format!("[engine] punching peer {peer} (controller)"));
         }
     } else if members.len() > 2 {
 
@@ -667,7 +701,7 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
                 let mut slot = shared.reflex.lock().unwrap();
                 if slot.is_none() {
                     *slot = Some(addr.to_string());
-                    log_line(format!("[engine] reflexive addr {addr}"));
+                    debug_line(format!("[engine] reflexive addr {addr}"));
                 }
             }
             continue;
@@ -864,7 +898,7 @@ fn playout_loop(
 
             if cur_sess != Some(sess) {
                 if cur_sess.is_some() {
-                    log_line(format!("[engine] sender changed -> resetting sequencer for session {sess}"));
+                    debug_line(format!("[engine] sender changed -> resetting sequencer for session {sess}"));
                 }
                 dec.resync(&mut sb.pkts);
                 dec.dead = 0;
@@ -884,7 +918,7 @@ fn playout_loop(
                     dec.dead += 1;
 
                     if dec.dead > RESYNC_CONCEAL && sb.recv_count > dec.dead_recv {
-                        log_line("[engine] jitter buffer desync - resyncing".into());
+                        debug_line("[engine] jitter buffer desync - resyncing".into());
                         dec.resync(&mut sb.pkts);
                         dec.dead = 0;
                     }
@@ -894,7 +928,7 @@ fn playout_loop(
                     sb.expanded += 1;
                     dec.dead += 1;
                     if dec.dead > RESYNC_CONCEAL && sb.recv_count > dec.dead_recv {
-                        log_line("[engine] jitter buffer stalled - resyncing".into());
+                        debug_line("[engine] jitter buffer stalled - resyncing".into());
                         dec.resync(&mut sb.pkts);
                         dec.dead = 0;
                     }
@@ -922,7 +956,7 @@ fn playout_loop(
                 tgt += STEREO_FRAME;
                 out_target.store(tgt, Ordering::Relaxed);
                 clean_needed = (clean_needed * 2).min(64);
-                log_line(format!("[engine] output buffer -> {} ms (under-runs)", tgt / STEREO_FRAME * FRAME_MS as usize));
+                debug_line(format!("[engine] output buffer -> {} ms (under-runs)", tgt / STEREO_FRAME * FRAME_MS as usize));
             }
             clean_since = Instant::now();
         } else if clean_since.elapsed().as_secs() >= clean_needed
@@ -933,7 +967,7 @@ fn playout_loop(
             clean_since = Instant::now();
 
             clean_needed = (clean_needed / 2).max(OUT_SHRINK_AFTER_S);
-            log_line(format!(
+            debug_line(format!(
                 "[engine] output buffer -> {} ms (clean; shrinking)",
                 tgt / STEREO_FRAME * FRAME_MS as usize
             ));

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -21,8 +22,9 @@ const USAGE: &str = "\
 star2 - runs the voice engine and keeps it up to date
 
 USAGE:
-    star2 --create <ROOM NAME>     make a room token, print it, join it
+    star2                          asks for a room token; blank makes a new room
     star2 --room <ROOM TOKEN>      join a room someone shared the token for
+    star2 --create <ROOM NAME>     make a room token, print it, join it
 
 Every other option is passed straight through to star2-engine, so:
 
@@ -50,12 +52,18 @@ async fn main() -> Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
-    let args = resolve_room(args);
+    let mut args = resolve_room(args);
+    if !args.iter().any(|a| a == "--room") {
+        if let Some(token) = ask_for_room() {
+            args.push("--room".into());
+            args.push(token);
+        }
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let exe = engine_path()?;
     let me = std::env::current_exe().context("locate the running runner")?;
-    println!("star2: supervising {}", exe.display());
+    println!("[star2] {} supervising {}", env!("CARGO_PKG_VERSION"), exe.display());
     let _ = std::fs::remove_file(me.with_extension("old"));
 
     if let Some(m) = fetch_or_warn().await {
@@ -74,7 +82,7 @@ async fn main() -> Result<()> {
         match run_session(&exe, &me, &args, &mut sup).await {
             Ok(true) => return Ok(()),
             Ok(false) => {}
-            Err(e) => eprintln!("  updater: {e}"),
+            Err(e) => eprintln!("[star2] updater: {e}"),
         }
 
         supervise(&exe, &args, &mut sup, RECONNECT_DELAY);
@@ -90,7 +98,7 @@ async fn run_session(
     let (ws, _) = tokio_tungstenite::connect_async(UPDATES_WS)
         .await
         .context("connect to update channel")?;
-    println!("  update channel connected");
+    println!("[star2] update channel connected");
     let (mut tx_ws, mut rx) = ws.split();
     let _ = tx_ws.send(Message::Text(env!("CARGO_PKG_VERSION").into())).await;
 
@@ -105,7 +113,7 @@ async fn run_session(
         tokio::select! {
             msg = rx.next() => match msg {
                 Some(Ok(_)) => {
-                    println!("  update announced");
+                    println!("[star2] update announced");
                     if check_and_apply(exe, me, args, sup).await {
                         return Ok(true);
                     }
@@ -118,6 +126,29 @@ async fn run_session(
     }
 }
 
+fn ask_for_room() -> Option<String> {
+    print!("room token (blank to create a new room): ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+
+    let typed = line.trim();
+    if star2_proto::is_room_token(typed) {
+        return Some(typed.to_string());
+    }
+
+    let token = star2_proto::new_room_token(typed);
+    println!();
+    println!("  your room token - share it, they paste it at the same prompt:");
+    println!();
+    println!("      {token}");
+    println!();
+    Some(token)
+}
+
 fn resolve_room(args: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     let mut it = args.into_iter();
@@ -128,12 +159,14 @@ fn resolve_room(args: Vec<String>) -> Vec<String> {
         match a.as_str() {
             "--create" => {
                 let token = star2_proto::new_room_token(&it.next().unwrap_or_default());
-                println!("room {:?} created", star2_proto::room_label(&token));
                 println!();
-                println!("    {token}");
+                println!("  room {:?} created - the token is:", star2_proto::room_label(&token));
                 println!();
-                println!("  share that token - they join with:  star2 --room {token}");
+                println!("      {token}");
+                println!();
+                println!("  share it - they join with:  star2 --room {token}");
                 println!("  --create mints a NEW token every run, so use --room to return to it");
+                println!();
                 created = Some(token);
             }
             "--room" => existing = it.next(),
@@ -152,7 +185,7 @@ async fn fetch_or_warn() -> Option<Manifest> {
     match fetch_manifest().await {
         Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("  manifest unavailable ({e}) - keeping current build");
+            eprintln!("[star2] manifest unavailable ({e}) - keeping current build");
             None
         }
     }
@@ -179,44 +212,44 @@ async fn replace_runner(
         return false;
     }
 
-    println!("  downloading runner {}", m.version);
+    println!("[star2] downloading runner {}", m.version);
     let staged = match stage(&me.with_extension("new"), &m.runner_url, &m.runner_sha256).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("  runner download failed, staying on current runner: {e}");
+            eprintln!("[star2] runner download failed, staying on current runner: {e}");
             return false;
         }
     };
 
-    println!("  stopping engine to swap in runner {}", m.version);
+    println!("[star2] stopping engine to swap in runner {}", m.version);
     if let Some(sup) = sup {
         sup.stop();
     }
 
     if let Err(e) = swap_self(me, &staged) {
-        eprintln!("  runner install failed, staying on current runner: {e}");
+        eprintln!("[star2] runner install failed, staying on current runner: {e}");
         let _ = std::fs::remove_file(&staged);
         return false;
     }
 
-    println!("  runner now on {} - relaunching", m.version);
+    println!("[star2] runner now on {} - relaunching", m.version);
     match Command::new(me).args(args).spawn() {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("  relaunch failed ({e}) - start star2 again by hand");
+            eprintln!("[star2] relaunch failed ({e}) - start star2 again by hand");
             true
         }
     }
 }
 
 async fn install(exe: &Path, m: &Manifest) {
-    println!("  installing build {}", m.version);
+    println!("[star2] installing build {}", m.version);
     match stage(&exe.with_extension("new"), &m.url, &m.sha256).await {
         Ok(tmp) => match swap(exe, &tmp) {
-            Ok(()) => println!("  now on {}", m.version),
-            Err(e) => eprintln!("  install failed, keeping current build: {e}"),
+            Ok(()) => println!("[star2] engine now on {}", m.version),
+            Err(e) => eprintln!("[star2] install failed, keeping current build: {e}"),
         },
-        Err(e) => eprintln!("  download failed, keeping current build: {e}"),
+        Err(e) => eprintln!("[star2] download failed, keeping current build: {e}"),
     }
 }
 
@@ -235,23 +268,23 @@ async fn check_and_apply(
     if !is_stale(exe, &manifest.sha256) {
         return false;
     }
-    println!("  downloading build {}", manifest.version);
+    println!("[star2] downloading build {}", manifest.version);
 
     let staged = match stage(&exe.with_extension("new"), &manifest.url, &manifest.sha256).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("  download failed, staying on current build: {e}");
+            eprintln!("[star2] download failed, staying on current build: {e}");
             return false;
         }
     };
 
-    println!("  stopping engine to swap in {}", manifest.version);
+    println!("[star2] stopping engine to swap in {}", manifest.version);
     sup.stop();
 
     if let Err(e) = swap(exe, &staged) {
-        eprintln!("  install failed: {e}");
+        eprintln!("[star2] install failed: {e}");
     } else {
-        println!("  now on {}", manifest.version);
+        println!("[star2] now on {}", manifest.version);
     }
 
     sup.start_now(exe, args);
@@ -315,7 +348,7 @@ fn engine_path() -> Result<PathBuf> {
 }
 
 fn spawn(exe: &Path, args: &[String]) -> Result<Child> {
-    println!("  starting star2-engine");
+    println!("[star2] starting star2-engine");
 
     Command::new(exe).args(args).spawn().context("spawn star2-engine")
 }
@@ -324,7 +357,7 @@ fn spawn_or_warn(exe: &Path, args: &[String]) -> Option<Child> {
     match spawn(exe, args) {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("  could not start engine ({e:#}) - will retry after update check");
+            eprintln!("[star2] could not start engine ({e:#}) - will retry after update check");
             None
         }
     }
@@ -366,7 +399,7 @@ impl Supervisor {
                     }
                     self.next_spawn = Instant::now() + self.backoff;
                     println!(
-                        "  star2-engine exited ({status}) - restarting in {:.1}s",
+                        "[star2] engine exited ({status}) - restarting in {:.1}s",
                         self.backoff.as_secs_f32()
                     );
                     self.child = None;

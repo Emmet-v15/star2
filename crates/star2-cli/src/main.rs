@@ -26,6 +26,7 @@ OPTIONS:
     --output <SUBSTR>  output device name match                [default: system default]
     --dev-buf <MS>     device buffer request, 0 = default      [default: 0]
     --stats            print the 1 Hz jitter/loss/rate readout
+    --verbose          print the audio/punching/jitter internals
     --list-devices     print audio devices and exit
     -h, --help         this
 ";
@@ -49,6 +50,7 @@ fn main() -> Result<()> {
             "--output" => cfg.output = val(),
             "--dev-buf" => cfg.dev_buf_ms = val().parse().unwrap_or(0),
             "--stats" => stats = true,
+            "--verbose" => star2_engine::set_verbose(true),
             "--list-devices" => return list_devices(),
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -70,10 +72,8 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "star2-engine {}: {} -> room {:?} [{}] as {:?} ({}, {} kbps)",
+        "[engine] {} joining {} as {:?} ({}, {} kbps)",
         env!("CARGO_PKG_VERSION"),
-        cfg.url,
-        star2_proto::room_label(&cfg.room_token),
         cfg.room_token,
         cfg.name,
         if cfg.stereo { "stereo" } else { "mono" },
@@ -87,15 +87,15 @@ fn main() -> Result<()> {
 
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Event::Status(s)) => println!("  {s}"),
-            Ok(Event::Direct(addr)) => println!("  direct path up: {addr}"),
+            Ok(Event::Status(s)) => println!("[engine] {s}"),
+            Ok(Event::Direct(_)) => {}
             Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms, rx_pps, play_fps }) => {
                 if stats {
                     println!("  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms  rx {rx_pps}/s  play {play_fps}/s");
                 }
             }
             Ok(Event::Ended(why)) => {
-                println!("call ended: {why}");
+                println!("[engine] call ended: {why}");
                 return Ok(());
             }
             Err(RecvTimeoutError::Timeout) => {}

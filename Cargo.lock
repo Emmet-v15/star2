@@ -1584,7 +1584,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "star2-cli"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "cpal",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "star2-engine"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "star2-proto"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "star2-signal"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "star2-updater"
-version = "0.2.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "futures-util",
