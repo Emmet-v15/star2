@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "crates/star2-cli", "crates/star2-updater"]
+members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "crates/star2-cli", "crates/star2-updater", "crates/star2-android"]
+
+# star2-android only ever builds for an Android target, and it needs libopus
+# cross-built first. Keeping it out of the default set means a plain
+# `cargo build` or `cargo test` on desktop ignores it.
+default-members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "crates/star2-cli", "crates/star2-updater"]
 
 [workspace.package]
 edition = "2021"
