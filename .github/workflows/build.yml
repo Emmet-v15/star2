@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # audiopus_sys compiles libopus from source, which needs autotools. Windows
+      # uses the MSVC path and doesn't. cpal itself needs nothing extra here:
+      # CoreAudio and WASAPI are system frameworks.
+      - name: Autotools (audiopus_sys builds libopus from source)
+        if: runner.os == 'macOS'
+        run: brew install -q autoconf automake libtool
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # libopus is built for the host arch, so each runner produces a native
+      # binary - macos-latest is Apple Silicon, macos-13 is Intel.
+      - name: Build client
+        run: cargo build --release -p star2-cli
+
+      - name: Test
+        run: cargo test --release -p star2-proto -p star2-engine
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: star2-${{ matrix.name }}
+          path: |
+            target/release/star2
+            target/release/star2.exe
+          if-no-files-found: error
+
+  signal:
+    # The signal server is pure Rust (no C deps), so it cross-compiles to the
+    # aarch64 relay box straight from Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add aarch64-unknown-linux-gnu
+      - run: cargo install cargo-zigbuild
+      - uses: goto-bus-stop/setup-zig@v2
+      - run: cargo zigbuild -p star2-signal --release --target aarch64-unknown-linux-gnu.2.34
+      - uses: actions/upload-artifact@v4
+        with:
+          name: star2-signal-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/star2-signal
+          if-no-files-found: error

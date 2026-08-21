@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "crates/star2-cli"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+star2-proto = { path = "crates/star2-proto" }
+
+# The signal server runs on a small loaded aarch64 box: optimize for size.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Keep the audio DSP usable in debug builds while staying quick to recompile.
+[profile.dev]
+opt-level = 1
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 3

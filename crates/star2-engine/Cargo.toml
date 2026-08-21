@@ -1,0 +1,22 @@
+[package]
+name = "star2-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "star2_engine"
+path = "src/lib.rs"
+
+[dependencies]
+star2-proto = { workspace = true }
+cpal = "0.15"
+audiopus = "0.2"
+getrandom = "0.3"
+ringbuf = "0.4"
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

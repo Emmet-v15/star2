@@ -1,0 +1,17 @@
+[package]
+name = "star2-signal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "star2-signal"
+path = "src/main.rs"
+
+[dependencies]
+star2-proto = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
