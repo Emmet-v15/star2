@@ -147,6 +147,12 @@ pub(crate) fn handle_punch(
     s.last_peer_rx = Instant::now(); // any valid punch from the peer is liveness
     match pr.kind {
         PUNCH_PROBE => {
+            // A valid probe proves the peer can reach us from `src`, so `src` is a
+            // usable candidate even if it was never advertised (ICE calls this
+            // peer-reflexive). Learning it here means the punch still completes
+            // when the signalled candidate list was empty or incomplete - without
+            // it, a side with nothing to probe can only sit and time out.
+            s.merge_cand(src);
             // Reply ACK echoing the txid, carrying the PEER's nonce so it validates.
             let rn = s.remote_nonce?;
             send_punch(sock, my_session, PUNCH_ACK, rn, pr.txid, src, false);
@@ -180,7 +186,15 @@ pub(crate) fn p2p_fail(s: &mut P2pState, route: &MediaRoute, why: &str) {
 /// Clear the pairing entirely (peer left / roster changed).
 pub(crate) fn p2p_teardown(p2p: &Mutex<P2pState>, route: &MediaRoute, why: &str) {
     let mut s = p2p.lock().unwrap();
+    // OUR OWN candidates survive a teardown. They describe this process - its
+    // reflexive address and its LAN address - not the pairing, and they are only
+    // ever discovered once, at startup. Wiping them here meant every subsequent
+    // offer/answer carried an EMPTY candidate list, so the peer had nothing to
+    // probe and the punch could only ever time out. Nothing rediscovers them
+    // short of restarting the process.
+    let my_cands = std::mem::take(&mut s.my_cands);
     *s = P2pState::new();
+    s.my_cands = my_cands;
     *route.dst.lock().unwrap() = None;
     route.allowed.lock().unwrap().clear();
     log_line(format!("[p2p] teardown ({why})"));

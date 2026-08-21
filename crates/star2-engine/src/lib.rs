@@ -55,7 +55,7 @@ const OUT_SHRINK_AFTER_S: u64 = 2;
 // --- Jitter buffer ---
 const MAX_FRAMES: usize = (300 / FRAME_MS) as usize; // hard cap on the adaptive buffer
 const SHED_MARGIN: usize = (80 / FRAME_MS) as usize; // catch up beyond target + this
-const JITTER_K: f64 = 3.0; // buffer depth = K x measured jitter percentile
+const JITTER_K: f64 = 2.0; // buffer depth = K x measured jitter percentile
 const JITTER_MARGIN_MS: f64 = 8.0; // + safety margin
 const RESYNC_CONCEAL: u32 = 500 / FRAME_MS; // ~0.5 s of solid PLC => force a re-lock
 const JB_BINS: usize = 64; // histogram bins for the |jitter| distribution
@@ -72,6 +72,8 @@ const P2P_PUNCH_TIMEOUT: Duration = Duration::from_secs(8);
 /// No peer traffic for this long on an established direct path => the call is dead.
 /// Generous because audio itself is the liveness signal and a muted peer still sends.
 const P2P_DIRECT_DEAD: Duration = Duration::from_secs(5);
+/// Wait between punch attempts when both peers are in the room but not connected.
+const P2P_RETRY_COOLDOWN: Duration = Duration::from_secs(6);
 const P2P_MAX_CANDS: usize = 8;
 const P2P_MAX_TXIDS: usize = 256;
 const PKT_BUF: usize = 4096;
@@ -187,6 +189,11 @@ struct Shared {
     inbox: Mutex<HashMap<SessionId, SenderBuf>>,
     p2p: Mutex<P2pState>,
     route: MediaRoute,
+    /// Who is currently in our room, as last reported by the server. Kept so the
+    /// punch thread can retry without waiting for a roster change - after a failed
+    /// punch both peers are still in the room, so no further roster event is ever
+    /// coming and a retry driven only by those would never fire.
+    members: Mutex<HashSet<SessionId>>,
     /// Queue of signaling messages for the control loop to send.
     ctrl_tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
     /// Audio packets we have SENT. Without this a one-way call looks perfectly
@@ -255,6 +262,7 @@ where
         inbox: Mutex::new(HashMap::new()),
         p2p: Mutex::new(P2pState::new()),
         route: MediaRoute { dst: Mutex::new(None), allowed: Mutex::new(HashSet::new()) },
+        members: Mutex::new(HashSet::new()),
         ctrl_tx: Mutex::new(None),
         tx_pkts: AtomicU64::new(0),
         mic_peak: AtomicU32::new(0),
@@ -540,6 +548,7 @@ async fn control_loop(
                         on_membership(shared, &HashSet::from([me, session]), on_event);
                     }
                     ServerMsg::Left { session } => {
+                        shared.members.lock().unwrap().remove(&session);
                         let peer = shared.p2p.lock().unwrap().peer_session;
                         if peer == Some(session) {
                             // NOT fatal. Tearing down returns us to Idle, and the
@@ -633,6 +642,8 @@ fn on_membership(
     members: &HashSet<SessionId>,
     on_event: &Arc<dyn Fn(Event) + Send + Sync>,
 ) {
+    // Record the roster centrally so the punch thread can retry off it later.
+    *shared.members.lock().unwrap() = members.clone();
     let me = shared.my_session();
     if members.len() == 2 && members.contains(&me) {
         let Some(peer) = members.iter().copied().find(|&m| m != me) else { return };
@@ -735,6 +746,7 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
 // ---------------------------------------------------------------------------
 
 fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event) + Send + Sync>) {
+    let mut next_retry = Instant::now() + P2P_RETRY_COOLDOWN;
     while !shared.stop.load(Ordering::Relaxed) {
         std::thread::sleep(P2P_PROBE_INTERVAL);
         let me = shared.my_session();
@@ -783,7 +795,22 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                     send_punch(sock, me, PUNCH_PROBE, rn, txid, dst, false);
                 }
             }
-            P2pPhase::Idle | P2pPhase::Failed => {}
+            P2pPhase::Idle | P2pPhase::Failed => {
+                // Both peers are still in the room after a failed punch, so no
+                // further roster event is coming - without this, one timeout means
+                // no call until somebody manually restarts. Retry on a cooldown so
+                // a transient failure (a peer mid-restart, a stale session, a
+                // dropped offer) heals itself.
+                drop(s);
+                if Instant::now() >= next_retry {
+                    let members = shared.members.lock().unwrap().clone();
+                    if members.len() == 2 && members.contains(&me) {
+                        next_retry = Instant::now() + P2P_RETRY_COOLDOWN;
+                        on_event(Event::Status("retrying hole punch".into()));
+                        on_membership(shared, &members, on_event);
+                    }
+                }
+            }
         }
     }
 }
