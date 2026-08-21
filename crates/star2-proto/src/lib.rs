@@ -71,6 +71,13 @@ pub enum ClientMsg {
         /// Buffer-deepening frames per second. Transient after a path change and
         /// should settle to zero; sustained non-zero means the target keeps rising.
         expand_pps: u32,
+        /// Audio packets SENT per second. Both peers reporting only what they
+        /// receive is how a one-way call hides; this is the other half.
+        tx_pps: u32,
+        /// Peak mic level in dBFS since the last tick. -99 means literal silence
+        /// (dead or muted device); around -60 is a very quiet mic; -20..-6 is normal
+        /// speech. Distinguishes "no signal" from "quiet signal" without guessing.
+        mic_db: f32,
         /// "direct" once punched, otherwise the phase we're stuck in.
         path: String,
     },

@@ -286,13 +286,18 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             late_pps,
             resyncs,
             expand_pps,
+            tx_pps,
+            mic_db,
             path,
         } => {
             let name = hub.sessions.get(&me).map(|s| s.name.as_str()).unwrap_or("?");
+            // tx/mic first: they are the half that was missing, and a one-way call
+            // shows up here as tx=0 or mic=-99 while everything else looks fine.
             eprintln!(
-                "[stats] {name}(s{me}) path={path} loss={loss_pct:.1}% late={late_pps}/s \
-                 expand={expand_pps}/s resync={resyncs} jitter={jitter_ms:.1}ms buf={buf_ms}ms \
-                 out={out_ms}ms rx={rx_pps}/s play={play_fps}/s"
+                "[stats] {name}(s{me}) path={path} tx={tx_pps}/s mic={mic_db:.0}dB \
+                 rx={rx_pps}/s play={play_fps}/s loss={loss_pct:.1}% late={late_pps}/s \
+                 expand={expand_pps}/s resync={resyncs} jitter={jitter_ms:.1}ms \
+                 buf={buf_ms}ms out={out_ms}ms"
             );
         }
         // P2P signaling: forward verbatim, stamping `from`, but only within a room.

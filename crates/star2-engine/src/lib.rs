@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,7 +189,24 @@ struct Shared {
     route: MediaRoute,
     /// Queue of signaling messages for the control loop to send.
     ctrl_tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
+    /// Audio packets we have SENT. Without this a one-way call looks perfectly
+    /// healthy from both ends: each side reports only what it *receives*, so a
+    /// silent outbound stream is invisible in the telemetry.
+    tx_pkts: AtomicU64,
+    /// Peak mic amplitude since the last stats tick, as f32 bits. Reported in dBFS,
+    /// where silence is -99: a level says strictly more than a dead/alive flag -
+    /// it separates "no device" from "mic is just very quiet".
+    mic_peak: AtomicU32,
     stop: Arc<AtomicBool>,
+}
+
+/// Linear amplitude (0..1) to dBFS, floored at -99 so silence prints finitely.
+fn to_dbfs(peak: f32) -> f32 {
+    if peak <= 1e-5 {
+        -99.0
+    } else {
+        20.0 * peak.log10()
+    }
 }
 
 impl Shared {
@@ -230,6 +247,8 @@ where
         p2p: Mutex::new(P2pState::new()),
         route: MediaRoute { dst: Mutex::new(None), allowed: Mutex::new(HashSet::new()) },
         ctrl_tx: Mutex::new(None),
+        tx_pkts: AtomicU64::new(0),
+        mic_peak: AtomicU32::new(0),
         stop: stop.clone(),
     });
 
@@ -778,9 +797,15 @@ fn encode_loop(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        let mut peak = 0.0f32;
         for s in pcm_f.iter_mut() {
             *s = in_cons.try_pop().unwrap_or(0.0);
+            peak = peak.max(s.abs());
         }
+        // Running peak until the stats tick reads and clears it. Measured BEFORE
+        // the send check, so a mic that works while the path is down still shows.
+        let prev = f32::from_bits(shared.mic_peak.load(Ordering::Relaxed));
+        shared.mic_peak.store(peak.max(prev).to_bits(), Ordering::Relaxed);
         // No direct path yet: keep draining the mic ring (so it can't overflow and
         // desync the capture clock) but send nothing - there is nowhere to send.
         let Some(dst) = *shared.route.dst.lock().unwrap() else {
@@ -794,7 +819,9 @@ fn encode_loop(
         let session = shared.my_session();
         if let Ok(len) = enc.encode(&pcm_i16, &mut dg[MEDIA_HEADER_LEN..]) {
             MediaHeader::new(session, seq, ts, base_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
-            let _ = sock.send_to(&dg[..MEDIA_HEADER_LEN + len], dst);
+            if sock.send_to(&dg[..MEDIA_HEADER_LEN + len], dst).is_ok() {
+                shared.tx_pkts.fetch_add(1, Ordering::Relaxed);
+            }
         }
         seq = seq.wrapping_add(1);
         ts = ts.wrapping_add(FRAME as u32);
@@ -932,6 +959,12 @@ fn playout_loop(
         if last_stats.elapsed() >= Duration::from_secs(1) {
             let secs = last_stats.elapsed().as_secs_f64();
             last_stats = Instant::now();
+            // Send-side figures are read whether or not we are RECEIVING anything.
+            // A client that receives nothing used to report nothing at all, which is
+            // precisely how a one-way call stayed invisible in the telemetry.
+            let tx = shared.tx_pkts.swap(0, Ordering::Relaxed);
+            let tx_pps = (tx as f64 / secs).round() as u32;
+            let mic_db = to_dbfs(f32::from_bits(shared.mic_peak.swap(0, Ordering::Relaxed)));
             let inbox = shared.inbox.lock().unwrap();
             if let Some(sb) = inbox.get(&sess) {
                 // Windowed, not cumulative: a lifetime average hides recovery, and
@@ -980,6 +1013,32 @@ fn playout_loop(
                     late_pps: (late as f64 / secs).round() as u32,
                     resyncs: resyncs as u32,
                     expand_pps: (expands as f64 / secs).round() as u32,
+                    tx_pps,
+                    mic_db,
+                    path: path.into(),
+                });
+            } else {
+                // Receiving nothing. Still report, so the send side and mic level
+                // are visible - silence here is the signal, not the absence of one.
+                drop(inbox);
+                let path = match shared.p2p.lock().unwrap().phase {
+                    P2pPhase::Direct => "direct",
+                    P2pPhase::Punching => "punching",
+                    P2pPhase::Failed => "failed",
+                    P2pPhase::Idle => "idle",
+                };
+                shared.send_ctrl(ClientMsg::Stats {
+                    loss_pct: 0.0,
+                    jitter_ms: 0.0,
+                    buf_ms: 0,
+                    out_ms: 0,
+                    rx_pps: 0,
+                    play_fps: 0,
+                    late_pps: 0,
+                    resyncs: 0,
+                    expand_pps: 0,
+                    tx_pps,
+                    mic_db,
                     path: path.into(),
                 });
             }
