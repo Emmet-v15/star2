@@ -7,6 +7,10 @@
 //!      is announced, fetch the manifest, verify the hash, swap the binary and
 //!      restart the child.
 //!
+//! Updates are push-only. The hash is also checked once when the socket connects,
+//! which is what catches a build shipped while this was offline; if the socket
+//! drops, we reconnect, and that reconnect check covers whatever was missed.
+//!
 //! The split also means the frequently-changing part (the engine) is the part that
 //! auto-updates, while the supervisor - which must survive the swap - rarely moves.
 //!
@@ -32,9 +36,6 @@ use sha2::{Digest, Sha256};
 
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
 const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
-/// Fallback sweep, because a WebSocket that has quietly died looks exactly like a
-/// WebSocket with nothing to say.
-const POLL: Duration = Duration::from_secs(300);
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 
 const USAGE: &str = "\
@@ -101,13 +102,10 @@ async fn run_session(exe: &Path, args: &[String], child: &mut Option<Child>) -> 
 
     check_and_apply(exe, args, child).await;
 
-    // Intervals, not sleeps: `select!` cancels the losing branches each iteration,
-    // so a `sleep(POLL)` would be restarted by every 2 s liveness tick and never
-    // fire. An Interval keeps its deadline across iterations.
-    let mut poll = tokio::time::interval(POLL);
-    poll.tick().await; // the first tick completes immediately - discard it
+    // Interval, not sleep: `select!` cancels the losing branches on every iteration,
+    // so a `sleep` here would be restarted each time round and never fire.
     let mut live = tokio::time::interval(Duration::from_secs(2));
-    live.tick().await;
+    live.tick().await; // the first tick completes immediately - discard it
 
     loop {
         tokio::select! {
@@ -118,8 +116,8 @@ async fn run_session(exe: &Path, args: &[String], child: &mut Option<Child>) -> 
                 }
                 _ => return Ok(()), // closed or errored; caller reconnects
             },
-            _ = poll.tick() => check_and_apply(exe, args, child).await,
-            // Cheap liveness tick: restart the child if it died on its own.
+            // Process supervision only - restart the child if it died on its own.
+            // This never touches the network.
             _ = live.tick() => ensure_running(exe, args, child),
         }
     }

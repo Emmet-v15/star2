@@ -52,8 +52,10 @@ to outlive the engine to replace it. It also means the part that changes often
 | path | when |
 |---|---|
 | WebSocket push | instant — `publish-client.sh` POSTs `/star2/notify`, the server fans out a nudge |
-| on connect | catches builds shipped while the runner was offline |
-| 5-minute poll | fallback, because a dead WebSocket looks exactly like a quiet one |
+| on connect | once per connection, catching builds shipped while the runner was offline |
+
+Push-only; there is no polling loop. A dropped socket reconnects, and the check on
+reconnect covers anything missed while it was down.
 
 The nudge carries no payload beyond "go look again". The manifest and binary are
 fetched over TLS and checked against the manifest's SHA-256, so a forged nudge can
