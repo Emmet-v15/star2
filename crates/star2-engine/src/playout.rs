@@ -31,6 +31,14 @@ pub(crate) enum Playout {
     Rendered,
     /// No packet for this slot - filled by packet-loss concealment (loss/late).
     Concealed,
+    /// Deliberate one-frame deepening of the buffer: concealment audio was emitted
+    /// but the sequencer did NOT advance, so the packet we are waiting for still
+    /// gets played when it arrives. This is how the queue grows toward its target
+    /// without dropping anything - the standard "expand" operation.
+    ///
+    /// It must still emit audio. Producing nothing instead starves the output ring,
+    /// which under-runs, which inflates the output pre-buffer without bound.
+    Expanded,
 }
 
 /// Decode state: an Opus decoder (lazily resized to the sender's channel count) plus
@@ -164,15 +172,19 @@ impl DecState {
                 // The next packet hasn't arrived AND we are running shallower than
                 // the target depth. Do NOT burn its slot: concealing here advances
                 // the sequencer past it, so when it lands a moment later `retain`
-                // throws it away as late - concealment we could have avoided by
-                // simply waiting. Stalling re-deepens the queue toward the target,
-                // which is otherwise only ever enforced at the initial latch.
+                // throws it away as late - concealment we could have avoided.
                 //
-                // Bounded by the target depth so a peer that genuinely stopped
-                // sending falls through to concealment instead of stalling forever.
+                // Emit concealment audio anyway (the output device still needs a
+                // frame this tick) but leave `next` alone, so the queue deepens by
+                // one frame toward a target that is otherwise only ever enforced at
+                // the initial latch.
+                //
+                // Bounded by the target depth, so a peer that genuinely stopped
+                // sending falls through to real concealment instead of expanding
+                // forever.
                 self.stalled += 1;
-                out.iter_mut().for_each(|x| *x = 0.0);
-                return Playout::Idle; // note: `next` deliberately not advanced
+                self.plc(out, scratch);
+                return Playout::Expanded; // note: `next` deliberately not advanced
             }
             None => {
                 self.stalled = 0;
@@ -277,6 +289,9 @@ pub(crate) struct SenderBuf {
     pub(crate) played: u64,
     /// Of those, how many were concealment (PLC) frames - loss/late.
     pub(crate) concealed: u64,
+    /// Deliberate buffer-deepening frames. Audio, but synthetic - counted apart
+    /// from `concealed` because nothing was dropped to produce them.
+    pub(crate) expanded: u64,
     /// Current adaptive jitter-buffer target depth, in frames.
     pub(crate) target_frames: usize,
 }
@@ -377,7 +392,7 @@ mod audio_fidelity {
             // target 1: play as soon as a packet is available, no pre-buffering.
             match dec.produce(&mut sb.pkts, 1, &mut frame, &mut scratch) {
                 Playout::Rendered => out.extend_from_slice(&frame),
-                Playout::Concealed => {
+                Playout::Concealed | Playout::Expanded => {
                     concealed += 1;
                     out.extend_from_slice(&frame);
                 }

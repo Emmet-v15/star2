@@ -285,13 +285,14 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             play_fps,
             late_pps,
             resyncs,
+            expand_pps,
             path,
         } => {
             let name = hub.sessions.get(&me).map(|s| s.name.as_str()).unwrap_or("?");
             eprintln!(
                 "[stats] {name}(s{me}) path={path} loss={loss_pct:.1}% late={late_pps}/s \
-                 resync={resyncs} jitter={jitter_ms:.1}ms buf={buf_ms}ms out={out_ms}ms \
-                 rx={rx_pps}/s play={play_fps}/s"
+                 expand={expand_pps}/s resync={resyncs} jitter={jitter_ms:.1}ms buf={buf_ms}ms \
+                 out={out_ms}ms rx={rx_pps}/s play={play_fps}/s"
             );
         }
         // P2P signaling: forward verbatim, stamping `from`, but only within a room.

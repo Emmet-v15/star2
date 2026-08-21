@@ -823,7 +823,7 @@ fn playout_loop(
     let mut last_stats = Instant::now();
     // Previous-window counters, so the readout is per-second rather than lifetime.
     let (mut win_played, mut win_concealed, mut win_recv) = (0u64, 0u64, 0u64);
-    let (mut win_late, mut win_resync) = (0u64, 0u64);
+    let (mut win_late, mut win_resync, mut win_expand) = (0u64, 0u64, 0u64);
 
     while !shared.stop.load(Ordering::Relaxed) {
         // FILL-DRIVEN pacing: the output device is the master clock. We emit a frame
@@ -875,11 +875,18 @@ fn playout_loop(
                         dec.dead = 0;
                     }
                 }
+                // A deliberate one-frame deepening, not a dropout: audio was emitted
+                // and nothing was dropped, so it must not count as loss. Tracked
+                // separately so "we are deepening" stays distinguishable from
+                // "we are losing packets".
+                Playout::Expanded => sb.expanded += 1,
                 Playout::Idle => {}
             }
             (o, sess)
         };
 
+        // Expanded emits real audio and MUST be pushed - that is the whole point of
+        // it over stalling, which starved the ring and inflated the pre-buffer.
         if matches!(outcome, Playout::Idle) {
             // Still pre-buffering. Without this sleep the loop spins at full tilt
             // re-taking the lock, which is exactly what starved the recv thread.
@@ -911,6 +918,15 @@ fn playout_loop(
             tgt -= STEREO_FRAME;
             out_target.store(tgt, Ordering::Relaxed);
             clean_since = Instant::now();
+            // Relax the backoff on every SUCCESSFUL shrink. Without this the
+            // requirement only ever doubles, so a buffer that grows instantly on a
+            // single under-run soon needs 64 clean seconds to give a frame back -
+            // a one-way ratchet that climbs for the whole call and never returns.
+            clean_needed = (clean_needed / 2).max(OUT_SHRINK_AFTER_S);
+            log_line(format!(
+                "[engine] output buffer -> {} ms (clean; shrinking)",
+                tgt / STEREO_FRAME * FRAME_MS as usize
+            ));
         }
 
         if last_stats.elapsed() >= Duration::from_secs(1) {
@@ -950,8 +966,10 @@ fn playout_loop(
                 };
                 let late = dec.late_dropped - win_late;
                 let resyncs = dec.resyncs - win_resync;
+                let expands = sb.expanded - win_expand;
                 win_late = dec.late_dropped;
                 win_resync = dec.resyncs;
+                win_expand = sb.expanded;
                 shared.send_ctrl(ClientMsg::Stats {
                     loss_pct: loss,
                     jitter_ms: sb.est.mean_abs as f32,
@@ -961,6 +979,7 @@ fn playout_loop(
                     play_fps: play_fps as u32,
                     late_pps: (late as f64 / secs).round() as u32,
                     resyncs: resyncs as u32,
+                    expand_pps: (expands as f64 / secs).round() as u32,
                     path: path.into(),
                 });
             }

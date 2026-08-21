@@ -68,6 +68,9 @@ pub enum ClientMsg {
         /// Desync re-latches in this window. Each one dumps a whole buffer, so even
         /// one per second is a large share of the concealment.
         resyncs: u32,
+        /// Buffer-deepening frames per second. Transient after a path change and
+        /// should settle to zero; sustained non-zero means the target keeps rising.
+        expand_pps: u32,
         /// "direct" once punched, otherwise the phase we're stuck in.
         path: String,
     },
