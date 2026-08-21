@@ -556,8 +556,22 @@ async fn control_loop(
                         on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::Left { session } => {
-                        let peer = shared.p2p.lock().unwrap().peer_session;
-                        if peer == Some(session) {
+                        let (peer, phase) = {
+                            let s = shared.p2p.lock().unwrap();
+                            (s.peer_session, s.phase)
+                        };
+                        // A working direct path outranks the roster. `Left` is the
+                        // relay's *opinion* about the peer, and now that we reap
+                        // silent sessions it fires on a 30s signalling hiccup too -
+                        // tearing down live media on that would make the call depend
+                        // on the relay staying reachable, which is the one thing this
+                        // program is built not to need. The media path has its own
+                        // watchdog (P2P_DIRECT_DEAD) and that is the authority here.
+                        if peer == Some(session) && phase == P2pPhase::Direct {
+                            on_event(Event::Status(
+                                "relay says peer left, but the direct path is up - ignoring".into(),
+                            ));
+                        } else if peer == Some(session) {
                             // NOT fatal. Tearing down returns us to Idle, and the
                             // roster event when they rejoin starts a fresh
                             // negotiation - so we can just wait. Exiting here meant
