@@ -38,11 +38,12 @@ pub(crate) struct P2pState {
 
     pub(crate) my_cands: Vec<String>,
 
-    pub(crate) my_txids: VecDeque<u64>,
+    pub(crate) my_txids: VecDeque<(u64, Instant)>,
 
     pub(crate) started: Instant,
 
     pub(crate) last_peer_rx: Instant,
+    pub(crate) rtt_us: Option<u64>,
 }
 
 impl P2pState {
@@ -58,6 +59,7 @@ impl P2pState {
             my_txids: VecDeque::new(),
             started: now,
             last_peer_rx: now,
+            rtt_us: None,
         }
     }
 
@@ -66,7 +68,7 @@ impl P2pState {
         if self.my_txids.len() >= P2P_MAX_TXIDS {
             self.my_txids.pop_front();
         }
-        self.my_txids.push_back(txid);
+        self.my_txids.push_back((txid, Instant::now()));
         txid
     }
 
@@ -135,8 +137,11 @@ pub(crate) fn handle_punch(
             None
         }
         PUNCH_ACK => {
+            if let Some(&(_, sent)) = s.my_txids.iter().find(|(t, _)| *t == pr.txid) {
+                s.rtt_us = Some(sent.elapsed().as_micros() as u64);
+            }
 
-            if s.phase == P2pPhase::Punching && s.my_txids.contains(&pr.txid) {
+            if s.phase == P2pPhase::Punching && s.my_txids.iter().any(|(t, _)| *t == pr.txid) {
                 route.allowed.lock().unwrap().insert(src);
                 *route.dst.lock().unwrap() = Some(src);
                 s.phase = P2pPhase::Direct;

@@ -45,6 +45,23 @@ pub enum ClientMsg {
 
         mic_db: f32,
 
+        #[serde(default)]
+        dev_in_ms: f32,
+        #[serde(default)]
+        in_ring_ms: f32,
+        #[serde(default)]
+        enc_ms: f32,
+        #[serde(default)]
+        rtt_ms: f32,
+        #[serde(default)]
+        jb_ms: f32,
+        #[serde(default)]
+        dev_out_ms: f32,
+        #[serde(default)]
+        tx_path_ms: f32,
+        #[serde(default)]
+        rx_path_ms: f32,
+
         path: String,
     },
 

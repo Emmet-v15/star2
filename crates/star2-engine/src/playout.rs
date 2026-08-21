@@ -13,6 +13,7 @@ pub(crate) fn seq_lt(a: u16, b: u16) -> bool {
 pub(crate) struct AudioPkt {
     pub(crate) flags: u8,
     pub(crate) data: Vec<u8>,
+    pub(crate) arr: Instant,
 }
 
 pub(crate) enum Playout {
@@ -33,6 +34,8 @@ pub(crate) struct DecState {
     pub(crate) started: bool,
 
     pub(crate) dead: u32,
+    pub(crate) jb_sum_us: u64,
+    pub(crate) jb_n: u64,
     pub(crate) dead_recv: u64,
 
     pub(crate) late_dropped: u64,
@@ -50,6 +53,8 @@ impl DecState {
             next: None,
             started: false,
             dead: 0,
+            jb_sum_us: 0,
+            jb_n: 0,
             dead_recv: 0,
             late_dropped: 0,
             resyncs: 0,
@@ -133,6 +138,8 @@ impl DecState {
         let outcome = match pkts.remove(&n) {
             Some(pkt) => {
                 self.stalled = 0;
+                self.jb_sum_us += pkt.arr.elapsed().as_micros() as u64;
+                self.jb_n += 1;
                 self.render(&pkt, out, scratch);
                 Playout::Rendered
             }
@@ -311,7 +318,7 @@ mod audio_fidelity {
             }
             let n = enc.encode(&pcm, &mut payload).unwrap();
             if keep(f) {
-                sb.insert_capped(f as u16, AudioPkt { flags, data: payload[..n].to_vec() });
+                sb.insert_capped(f as u16, AudioPkt { flags, data: payload[..n].to_vec(), arr: Instant::now() });
             }
 
             match dec.produce(&mut sb.pkts, 1, &mut frame, &mut scratch) {
@@ -453,7 +460,7 @@ mod tests {
     fn evicts_oldest_when_full() {
         let mut sb = SenderBuf::default();
         for seq in 0..300u16 {
-            sb.insert_capped(seq, AudioPkt { flags: 0, data: vec![] });
+            sb.insert_capped(seq, AudioPkt { flags: 0, data: vec![], arr: Instant::now() });
         }
         assert!(sb.pkts.len() <= 256);
 

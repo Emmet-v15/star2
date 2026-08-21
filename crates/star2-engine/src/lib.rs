@@ -158,6 +158,13 @@ struct Shared {
     tx_pkts: AtomicU64,
 
     mic_peak: AtomicU32,
+
+    dev_in_us: AtomicU32,
+    dev_out_us: AtomicU32,
+    ring_sum_us: AtomicU64,
+    ring_n: AtomicU64,
+    enc_sum_us: AtomicU64,
+    enc_n: AtomicU64,
     stop: Arc<AtomicBool>,
 }
 
@@ -208,6 +215,12 @@ where
         ctrl_tx: Mutex::new(None),
         tx_pkts: AtomicU64::new(0),
         mic_peak: AtomicU32::new(0),
+        dev_in_us: AtomicU32::new(0),
+        dev_out_us: AtomicU32::new(0),
+        ring_sum_us: AtomicU64::new(0),
+        ring_n: AtomicU64::new(0),
+        enc_sum_us: AtomicU64::new(0),
+        enc_n: AtomicU64::new(0),
         stop: stop.clone(),
     });
 
@@ -257,9 +270,14 @@ where
         let mut resamp = (in_rate != SR).then(|| Resampler::new(in_rate, SR, send_ch));
         let mut dm: Vec<f32> = Vec::with_capacity(2048);
         let mut rs: Vec<f32> = Vec::with_capacity(2048);
+        let sh_in = shared.clone();
         input.build_input_stream(
             &cfg2,
-            move |data: &[f32], _| {
+            move |data: &[f32], info: &cpal::InputCallbackInfo| {
+                let t = info.timestamp();
+                if let Some(d) = t.callback.duration_since(&t.capture) {
+                    sh_in.dev_in_us.store(d.as_micros() as u32, Ordering::Relaxed);
+                }
                 dm.clear();
                 let mut i = 0;
                 while i + in_ch <= data.len() {
@@ -293,9 +311,14 @@ where
         let mut cfg2: cpal::StreamConfig = out_cfg.clone().into();
         cfg2.buffer_size = buffer_size_for(out_cfg.buffer_size(), cfg.dev_buf_ms);
         let underruns = underruns.clone();
+        let sh_out = shared.clone();
         output.build_output_stream(
             &cfg2,
-            move |data: &mut [f32], _| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                let t = info.timestamp();
+                if let Some(d) = t.playback.duration_since(&t.callback) {
+                    sh_out.dev_out_us.store(d.as_micros() as u32, Ordering::Relaxed);
+                }
                 let mut i = 0;
                 while i + out_ch <= data.len() {
 
@@ -678,7 +701,7 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
         sb.last_arr_ms = Some(arr_ms);
         sb.last_ts = Some(h.timestamp);
         sb.recv_count += 1;
-        sb.insert_capped(h.seq, AudioPkt { flags: h.flags, data: payload.to_vec() });
+        sb.insert_capped(h.seq, AudioPkt { flags: h.flags, data: payload.to_vec(), arr: Instant::now() });
     }
 }
 
@@ -761,6 +784,11 @@ fn encode_loop(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        let ring_us = (in_cons.occupied_len() as u64 * 1_000_000)
+            / (SR as u64 * send_ch as u64);
+        shared.ring_sum_us.fetch_add(ring_us, Ordering::Relaxed);
+        shared.ring_n.fetch_add(1, Ordering::Relaxed);
+        let enc_start = Instant::now();
         let mut peak = 0.0f32;
         for s in pcm_f.iter_mut() {
             *s = in_cons.try_pop().unwrap_or(0.0);
@@ -783,6 +811,8 @@ fn encode_loop(
             MediaHeader::new(session, seq, ts, base_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
             if sock.send_to(&dg[..MEDIA_HEADER_LEN + len], dst).is_ok() {
                 shared.tx_pkts.fetch_add(1, Ordering::Relaxed);
+                shared.enc_sum_us.fetch_add(enc_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                shared.enc_n.fetch_add(1, Ordering::Relaxed);
             }
         }
         seq = seq.wrapping_add(1);
@@ -895,6 +925,27 @@ fn playout_loop(
             let tx = shared.tx_pkts.swap(0, Ordering::Relaxed);
             let tx_pps = (tx as f64 / secs).round() as u32;
             let mic_db = to_dbfs(f32::from_bits(shared.mic_peak.swap(0, Ordering::Relaxed)));
+            let mean_ms = |sum: u64, n: u64| if n > 0 { sum as f32 / n as f32 / 1000.0 } else { 0.0 };
+            let dev_in_ms = shared.dev_in_us.load(Ordering::Relaxed) as f32 / 1000.0;
+            let dev_out_ms = shared.dev_out_us.load(Ordering::Relaxed) as f32 / 1000.0;
+            let in_ring_ms = mean_ms(
+                shared.ring_sum_us.swap(0, Ordering::Relaxed),
+                shared.ring_n.swap(0, Ordering::Relaxed),
+            );
+            let enc_ms = mean_ms(
+                shared.enc_sum_us.swap(0, Ordering::Relaxed),
+                shared.enc_n.swap(0, Ordering::Relaxed),
+            );
+            let rtt_ms = {
+                let mut p = shared.p2p.lock().unwrap();
+                let v = p.rtt_us.map(|u| u as f32 / 1000.0).unwrap_or(0.0);
+                p.rtt_us = None;
+                v
+            };
+            let jb_ms = mean_ms(
+                std::mem::take(&mut dec.jb_sum_us),
+                std::mem::take(&mut dec.jb_n),
+            );
             let inbox = shared.inbox.lock().unwrap();
             if let Some(sb) = inbox.get(&sess) {
 
@@ -943,6 +994,14 @@ fn playout_loop(
                     expand_pps: (expands as f64 / secs).round() as u32,
                     tx_pps,
                     mic_db,
+                    dev_in_ms,
+                    in_ring_ms,
+                    enc_ms,
+                    rtt_ms,
+                    jb_ms,
+                    dev_out_ms,
+                    tx_path_ms: dev_in_ms + in_ring_ms + enc_ms,
+                    rx_path_ms: jb_ms + out_ms as f32 + dev_out_ms,
                     path: path.into(),
                 });
             } else {
@@ -966,6 +1025,14 @@ fn playout_loop(
                     expand_pps: 0,
                     tx_pps,
                     mic_db,
+                    dev_in_ms,
+                    in_ring_ms,
+                    enc_ms,
+                    rtt_ms,
+                    jb_ms: 0.0,
+                    dev_out_ms,
+                    tx_path_ms: dev_in_ms + in_ring_ms + enc_ms,
+                    rx_path_ms: 0.0,
                     path: path.into(),
                 });
             }
