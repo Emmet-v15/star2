@@ -40,12 +40,13 @@ echo "==> uploading -> $WEBROOT/$REMOTE"
 scp -q "$LOCAL" "$HOST:/tmp/$REMOTE"
 ssh "$HOST" "sudo -n mv -f /tmp/$REMOTE $WEBROOT/$REMOTE && sudo -n chmod 644 $WEBROOT/$REMOTE"
 
-# Ship the runner too. It does NOT self-update (it's the thing holding the file
-# handle during a swap), so users re-download it by hand on the rare occasions it
-# changes - but publishing it every time keeps the download current.
+# Ship the runner too. It self-replaces (rename the running exe aside, drop the
+# new one in its place, relaunch), so the manifest carries its hash as well.
+RUN_SHA=""
 if [ -f "$RUN_LOCAL" ]; then
     scp -q "$RUN_LOCAL" "$HOST:/tmp/$RUN_REMOTE"
     ssh "$HOST" "sudo -n mv -f /tmp/$RUN_REMOTE $WEBROOT/$RUN_REMOTE && sudo -n chmod 644 $WEBROOT/$RUN_REMOTE"
+    RUN_SHA=$(sha256sum "$RUN_LOCAL" | cut -d' ' -f1)
     echo "==> published https://v15.studio/$RUN_REMOTE (runner)"
 fi
 
@@ -53,8 +54,8 @@ fi
 # so it must be computed from the exact bytes that were uploaded.
 SHA=$(sha256sum "$LOCAL" | cut -d' ' -f1)
 VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
-printf '{"version":"%s","sha256":"%s","url":"https://v15.studio/%s"}\n' \
-    "$VER" "$SHA" "$REMOTE" > /tmp/star2.json
+printf '{"version":"%s","sha256":"%s","url":"https://v15.studio/%s","runner_sha256":"%s","runner_url":"https://v15.studio/%s"}\n' \
+    "$VER" "$SHA" "$REMOTE" "$RUN_SHA" "$RUN_REMOTE" > /tmp/star2.json
 scp -q /tmp/star2.json "$HOST:/tmp/star2-manifest.json"
 ssh "$HOST" "sudo -n mv -f /tmp/star2-manifest.json $WEBROOT/star2.json && sudo -n chmod 644 $WEBROOT/star2.json"
 echo "==> manifest $VER $SHA"

@@ -30,6 +30,10 @@ struct Manifest {
     version: String,
     sha256: String,
     url: String,
+    #[serde(default)]
+    runner_sha256: String,
+    #[serde(default)]
+    runner_url: String,
 }
 
 #[tokio::main]
@@ -42,32 +46,48 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let exe = engine_path()?;
+    let me = std::env::current_exe().context("locate the running runner")?;
     println!("star2: supervising {}", exe.display());
+    let _ = std::fs::remove_file(me.with_extension("old"));
 
-    if let Some(m) = stale_manifest(&exe).await {
-        install(&exe, &m).await;
+    if let Some(m) = fetch_or_warn().await {
+        if replace_runner(&me, &m, &args, None).await {
+            return Ok(());
+        }
+        if is_stale(&exe, &m.sha256) {
+            install(&exe, &m).await;
+        }
     }
 
     let mut sup = Supervisor::new(&exe, &args);
 
     loop {
 
-        if let Err(e) = run_session(&exe, &args, &mut sup).await {
-            eprintln!("  updater: {e}");
+        match run_session(&exe, &me, &args, &mut sup).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => eprintln!("  updater: {e}"),
         }
 
         supervise(&exe, &args, &mut sup, RECONNECT_DELAY);
     }
 }
 
-async fn run_session(exe: &Path, args: &[String], sup: &mut Supervisor) -> Result<()> {
+async fn run_session(
+    exe: &Path,
+    me: &Path,
+    args: &[String],
+    sup: &mut Supervisor,
+) -> Result<bool> {
     let (ws, _) = tokio_tungstenite::connect_async(UPDATES_WS)
         .await
         .context("connect to update channel")?;
     println!("  update channel connected");
     let (_tx, mut rx) = ws.split();
 
-    check_and_apply(exe, args, sup).await;
+    if check_and_apply(exe, me, args, sup).await {
+        return Ok(true);
+    }
 
     let mut live = tokio::time::interval(Duration::from_secs(2));
     live.tick().await;
@@ -77,9 +97,11 @@ async fn run_session(exe: &Path, args: &[String], sup: &mut Supervisor) -> Resul
             msg = rx.next() => match msg {
                 Some(Ok(_)) => {
                     println!("  update announced");
-                    check_and_apply(exe, args, sup).await;
+                    if check_and_apply(exe, me, args, sup).await {
+                        return Ok(true);
+                    }
                 }
-                _ => return Ok(()),
+                _ => return Ok(false),
             },
 
             _ = live.tick() => sup.ensure_running(exe, args),
@@ -87,26 +109,70 @@ async fn run_session(exe: &Path, args: &[String], sup: &mut Supervisor) -> Resul
     }
 }
 
-async fn stale_manifest(exe: &Path) -> Option<Manifest> {
-    let manifest = match fetch_manifest().await {
-        Ok(m) => m,
+async fn fetch_or_warn() -> Option<Manifest> {
+    match fetch_manifest().await {
+        Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("  manifest unavailable ({e}) - keeping current engine");
-            return None;
+            eprintln!("  manifest unavailable ({e}) - keeping current build");
+            None
+        }
+    }
+}
+
+fn is_stale(path: &Path, want: &str) -> bool {
+    match local_sha(path) {
+        Ok(local) => !local.eq_ignore_ascii_case(want),
+        Err(_) => true,
+    }
+}
+
+async fn replace_runner(
+    me: &Path,
+    m: &Manifest,
+    args: &[String],
+    sup: Option<&mut Supervisor>,
+) -> bool {
+    if m.runner_sha256.is_empty() || m.runner_url.is_empty() {
+        return false;
+    }
+
+    if local_sha(me).map(|l| l.eq_ignore_ascii_case(&m.runner_sha256)).unwrap_or(true) {
+        return false;
+    }
+
+    println!("  downloading runner {}", m.version);
+    let staged = match stage(&me.with_extension("new"), &m.runner_url, &m.runner_sha256).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  runner download failed, staying on current runner: {e}");
+            return false;
         }
     };
 
-    if let Ok(local) = local_sha(exe) {
-        if local.eq_ignore_ascii_case(&manifest.sha256) {
-            return None;
+    println!("  stopping engine to swap in runner {}", m.version);
+    if let Some(sup) = sup {
+        sup.stop();
+    }
+
+    if let Err(e) = swap_self(me, &staged) {
+        eprintln!("  runner install failed, staying on current runner: {e}");
+        let _ = std::fs::remove_file(&staged);
+        return false;
+    }
+
+    println!("  runner now on {} - relaunching", m.version);
+    match Command::new(me).args(args).spawn() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  relaunch failed ({e}) - start star2 again by hand");
+            true
         }
     }
-    Some(manifest)
 }
 
 async fn install(exe: &Path, m: &Manifest) {
     println!("  installing build {}", m.version);
-    match stage(exe, m).await {
+    match stage(&exe.with_extension("new"), &m.url, &m.sha256).await {
         Ok(tmp) => match swap(exe, &tmp) {
             Ok(()) => println!("  now on {}", m.version),
             Err(e) => eprintln!("  install failed, keeping current build: {e}"),
@@ -115,15 +181,28 @@ async fn install(exe: &Path, m: &Manifest) {
     }
 }
 
-async fn check_and_apply(exe: &Path, args: &[String], sup: &mut Supervisor) {
-    let Some(manifest) = stale_manifest(exe).await else { return };
+async fn check_and_apply(
+    exe: &Path,
+    me: &Path,
+    args: &[String],
+    sup: &mut Supervisor,
+) -> bool {
+    let Some(manifest) = fetch_or_warn().await else { return false };
+
+    if replace_runner(me, &manifest, args, Some(sup)).await {
+        return true;
+    }
+
+    if !is_stale(exe, &manifest.sha256) {
+        return false;
+    }
     println!("  downloading build {}", manifest.version);
 
-    let staged = match stage(exe, &manifest).await {
+    let staged = match stage(&exe.with_extension("new"), &manifest.url, &manifest.sha256).await {
         Ok(p) => p,
         Err(e) => {
             eprintln!("  download failed, staying on current build: {e}");
-            return;
+            return false;
         }
     };
 
@@ -137,31 +216,42 @@ async fn check_and_apply(exe: &Path, args: &[String], sup: &mut Supervisor) {
     }
 
     sup.start_now(exe, args);
+    false
 }
 
-async fn stage(exe: &Path, m: &Manifest) -> Result<PathBuf> {
-    let bytes = reqwest::get(&m.url).await?.error_for_status()?.bytes().await?;
+async fn stage(tmp: &Path, url: &str, sha: &str) -> Result<PathBuf> {
+    let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
 
     let got = hex(Sha256::digest(&bytes).as_slice());
-    if !got.eq_ignore_ascii_case(&m.sha256) {
+    if !got.eq_ignore_ascii_case(sha) {
 
-        bail!("sha256 mismatch (manifest {}, got {got})", m.sha256);
+        bail!("sha256 mismatch (manifest {sha}, got {got})");
     }
 
-    let tmp = exe.with_extension("new");
-    std::fs::write(&tmp, &bytes).context("write new binary")?;
+    std::fs::write(tmp, &bytes).context("write new binary")?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o755))
             .context("mark new binary executable")?;
     }
-    Ok(tmp)
+    Ok(tmp.to_path_buf())
 }
 
 fn swap(exe: &Path, staged: &Path) -> Result<()> {
     std::fs::rename(staged, exe).context("overwrite engine with staged build")
+}
+
+fn swap_self(me: &Path, staged: &Path) -> Result<()> {
+    let old = me.with_extension("old");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(me, &old).context("move the running runner aside")?;
+    if let Err(e) = std::fs::rename(staged, me) {
+        let _ = std::fs::rename(&old, me);
+        return Err(e).context("move the new runner into place");
+    }
+    Ok(())
 }
 
 async fn fetch_manifest() -> Result<Manifest> {
