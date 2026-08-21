@@ -39,7 +39,7 @@ const OUT_SHRINK_AFTER_S: u64 = 2;
 
 const MAX_FRAMES: usize = (300 / FRAME_MS) as usize;
 const SHED_MARGIN: usize = (80 / FRAME_MS) as usize;
-const JITTER_K: f64 = 2.0;
+const JITTER_K: f64 = 3.0;
 const JITTER_MARGIN_MS: f64 = 8.0;
 const RESYNC_CONCEAL: u32 = 500 / FRAME_MS;
 const JB_BINS: usize = 64;
