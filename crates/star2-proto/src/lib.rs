@@ -13,6 +13,10 @@ pub mod flags {
 
     pub const REFLEX: u8 = 0b0000_0001;
 
+    pub const RED_WANTED: u8 = 0b0000_0010;
+
+    pub const RED: u8 = 0b0000_0100;
+
     pub const KEEPALIVE: u8 = 0b0000_1000;
 
     pub const STEREO: u8 = 0b0100_0000;
@@ -157,6 +161,26 @@ impl MediaHeader {
     pub fn is_stereo(&self) -> bool {
         self.flags & flags::STEREO != 0
     }
+    pub fn red_wanted(&self) -> bool {
+        self.flags & flags::RED_WANTED != 0
+    }
+    pub fn is_red(&self) -> bool {
+        self.flags & flags::RED != 0
+    }
+}
+
+pub const RED_LEN_BYTES: usize = 2;
+
+pub fn split_red(payload: &[u8]) -> Option<(&[u8], &[u8])> {
+    if payload.len() < RED_LEN_BYTES {
+        return None;
+    }
+    let n = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let rest = &payload[RED_LEN_BYTES..];
+    if n == 0 || n >= rest.len() {
+        return None;
+    }
+    Some((&rest[..n], &rest[n..]))
 }
 
 pub const PUNCH_MAGIC: [u8; 4] = *b"ST2P";
@@ -241,6 +265,24 @@ mod tests {
     #[test]
     fn decode_rejects_short() {
         assert!(MediaHeader::decode(&[0u8; MEDIA_HEADER_LEN - 1]).is_none());
+    }
+
+    #[test]
+    fn red_payload_round_trips() {
+        let (prev, cur) = (&[1u8, 2, 3][..], &[9u8, 8][..]);
+        let mut buf = (prev.len() as u16).to_be_bytes().to_vec();
+        buf.extend_from_slice(prev);
+        buf.extend_from_slice(cur);
+        assert_eq!(split_red(&buf), Some((prev, cur)));
+    }
+
+    #[test]
+    fn red_payload_rejects_junk() {
+        assert_eq!(split_red(&[]), None);
+        assert_eq!(split_red(&[0, 1]), None);
+        assert_eq!(split_red(&[0, 0, 7, 7]), None);
+        assert_eq!(split_red(&[0, 9, 7, 7]), None);
+        assert_eq!(split_red(&[0, 2, 7, 7]), None);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub(crate) fn seq_lt(a: u16, b: u16) -> bool {
 pub(crate) struct AudioPkt {
     pub(crate) flags: u8,
     pub(crate) data: Vec<u8>,
+    pub(crate) red: Option<Vec<u8>>,
     pub(crate) arr: Instant,
 }
 
@@ -45,6 +46,8 @@ pub(crate) struct DecState {
     pub(crate) resyncs: u64,
 
     pub(crate) stalled: u32,
+
+    pub(crate) recovered: u64,
 }
 
 impl DecState {
@@ -63,6 +66,7 @@ impl DecState {
             late_dropped: 0,
             resyncs: 0,
             stalled: 0,
+            recovered: 0,
         })
     }
 
@@ -77,9 +81,19 @@ impl DecState {
     }
 
     pub(crate) fn render(&mut self, pkt: &AudioPkt, out: &mut [f32], scratch: &mut [i16]) {
-        let ch = if pkt.flags & flags::STEREO != 0 { 2 } else { 1 };
+        self.render_data(&pkt.data, pkt.flags, out, scratch);
+    }
+
+    pub(crate) fn render_data(
+        &mut self,
+        data: &[u8],
+        pkt_flags: u8,
+        out: &mut [f32],
+        scratch: &mut [i16],
+    ) {
+        let ch = if pkt_flags & flags::STEREO != 0 { 2 } else { 1 };
         self.ensure_ch(ch);
-        match self.dec.decode(Some(&pkt.data), &mut scratch[..FRAME * ch], false) {
+        match self.dec.decode(Some(data), &mut scratch[..FRAME * ch], false) {
             Ok(dn) => Self::upmix(out, ch, dn, |i| scratch[i] as f32 / 32768.0),
             Err(_) => out.iter_mut().for_each(|x| *x = 0.0),
         }
@@ -158,16 +172,29 @@ impl DecState {
                 self.render(&pkt, out, scratch);
                 Playout::Rendered
             }
-            None if pkts.len() < target && self.stalled < target.max(1) as u32 => {
-
-                self.stalled += 1;
-                self.plc(out, scratch);
-                return Playout::Expanded;
-            }
             None => {
-                self.stalled = 0;
-                self.plc(out, scratch);
-                Playout::Concealed
+                let carrier = pkts
+                    .get(&n.wrapping_add(1))
+                    .and_then(|p| p.red.as_ref().map(|r| (p.flags, r.clone())));
+                match carrier {
+                    Some((f, data)) => {
+                        self.stalled = 0;
+                        self.recovered += 1;
+                        self.render_data(&data, f, out, scratch);
+                        Playout::Rendered
+                    }
+                    None if pkts.len() < target && self.stalled < target.max(1) as u32 => {
+
+                        self.stalled += 1;
+                        self.plc(out, scratch);
+                        return Playout::Expanded;
+                    }
+                    None => {
+                        self.stalled = 0;
+                        self.plc(out, scratch);
+                        Playout::Concealed
+                    }
+                }
             }
         };
         self.next = Some(n.wrapping_add(1));
@@ -309,6 +336,16 @@ mod audio_fidelity {
         gen: impl Fn(usize, usize) -> f32,
         keep: impl Fn(usize) -> bool,
     ) -> (Vec<f32>, usize) {
+        through_pipeline_red(ch, frames, gen, keep, false).0
+    }
+
+    fn through_pipeline_red(
+        ch: usize,
+        frames: usize,
+        gen: impl Fn(usize, usize) -> f32,
+        keep: impl Fn(usize) -> bool,
+        red: bool,
+    ) -> ((Vec<f32>, usize), u64) {
         let channels = if ch == 2 { Channels::Stereo } else { Channels::Mono };
         let mut enc = Encoder::new(SampleRate::Hz48000, channels, Application::LowDelay).unwrap();
         enc.set_bitrate(Bitrate::BitsPerSecond(128_000)).unwrap();
@@ -323,6 +360,7 @@ mod audio_fidelity {
         let mut frame = vec![0.0f32; STEREO_FRAME];
         let mut scratch = vec![0i16; FRAME * 2];
         let mut concealed = 0;
+        let mut prev: Option<Vec<u8>> = None;
 
         for f in 0..frames {
             for i in 0..FRAME {
@@ -332,9 +370,15 @@ mod audio_fidelity {
                 }
             }
             let n = enc.encode(&pcm, &mut payload).unwrap();
+            let cur = payload[..n].to_vec();
             if keep(f) {
-                sb.insert_capped(f as u16, AudioPkt { flags, data: payload[..n].to_vec(), arr: Instant::now() });
+                let carried = if red { prev.clone() } else { None };
+                sb.insert_capped(
+                    f as u16,
+                    AudioPkt { flags, data: cur.clone(), red: carried, arr: Instant::now() },
+                );
             }
+            prev = Some(cur);
 
             match dec.produce(&mut sb.pkts, 1, &mut frame, &mut scratch) {
                 Playout::Rendered => out.extend_from_slice(&frame),
@@ -345,7 +389,7 @@ mod audio_fidelity {
                 Playout::Idle => {}
             }
         }
-        (out, concealed)
+        ((out, concealed), dec.recovered)
     }
 
     fn all(_: usize) -> bool {
@@ -433,6 +477,42 @@ mod audio_fidelity {
         let level = rms(steady, 2, 0);
         assert!(level > 0.15, "concealment left the audio too quiet (rms {level})");
     }
+
+    #[test]
+    fn redundancy_recovers_lost_packets() {
+        let tone = |i: usize, _c: usize| {
+            (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+        };
+        let drop = |f: usize| f % 10 != 3;
+
+        let ((_, plain_concealed), plain_rec) = through_pipeline_red(1, 80, tone, drop, false);
+        let ((out, red_concealed), red_rec) = through_pipeline_red(1, 80, tone, drop, true);
+
+        assert_eq!(plain_rec, 0, "no redundancy was sent, yet something was recovered");
+        assert!(red_rec >= 5, "redundancy recovered only {red_rec} of the dropped frames");
+        assert!(
+            red_concealed < plain_concealed,
+            "redundancy did not reduce concealment: {red_concealed} vs {plain_concealed}"
+        );
+
+        let steady = &out[20 * STEREO_FRAME..];
+        let at_1k = tone_energy(steady, 2, 0, 1000.0);
+        let at_3k = tone_energy(steady, 2, 0, 3000.0);
+        assert!(at_1k > at_3k * 10.0, "recovered audio is noise: 1k={at_1k:.5} 3k={at_3k:.5}");
+    }
+
+    #[test]
+    fn redundancy_is_inert_when_nothing_is_lost() {
+        let tone = |i: usize, _c: usize| {
+            (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+        };
+        let ((out, concealed), recovered) = through_pipeline_red(1, 60, tone, all, true);
+        assert_eq!(recovered, 0, "recovered {recovered} frames on a lossless link");
+        assert_eq!(concealed, 0, "concealed {concealed} frames on a lossless link");
+
+        let level = rms(&out[20 * STEREO_FRAME..], 2, 0);
+        assert!(level > 0.2 && level < 0.6, "carrying redundancy changed the audio (rms {level})");
+    }
 }
 
 #[cfg(test)]
@@ -475,7 +555,7 @@ mod tests {
     fn evicts_oldest_when_full() {
         let mut sb = SenderBuf::default();
         for seq in 0..300u16 {
-            sb.insert_capped(seq, AudioPkt { flags: 0, data: vec![], arr: Instant::now() });
+            sb.insert_capped(seq, AudioPkt { flags: 0, data: vec![], red: None, arr: Instant::now() });
         }
         assert!(sb.pkts.len() <= 256);
 

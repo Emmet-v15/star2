@@ -13,7 +13,7 @@ use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 use star2_proto::{
     flags, ClientMsg, MediaHeader, ServerMsg, SessionId, MEDIA_HEADER_LEN, PROTO_VERSION,
-    PUNCH_PROBE,
+    PUNCH_PROBE, RED_LEN_BYTES,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -43,6 +43,7 @@ const CONTRACT_EVERY: u32 = 1000 / FRAME_MS;
 const JITTER_K: f64 = 3.0;
 const JITTER_MARGIN_MS: f64 = 8.0;
 const RESYNC_CONCEAL: u32 = 500 / FRAME_MS;
+const RED_HOLD_S: u32 = 10;
 const JB_BINS: usize = 64;
 const JB_BIN_MS: f64 = 4.0;
 const JB_DECAY_EVERY: u32 = 256;
@@ -181,6 +182,9 @@ struct Shared {
     ring_n: AtomicU64,
     enc_sum_us: AtomicU64,
     enc_n: AtomicU64,
+
+    peer_wants_red: AtomicBool,
+    want_red: AtomicBool,
     stop: Arc<AtomicBool>,
 }
 
@@ -237,6 +241,8 @@ where
         ring_n: AtomicU64::new(0),
         enc_sum_us: AtomicU64::new(0),
         enc_n: AtomicU64::new(0),
+        peer_wants_red: AtomicBool::new(false),
+        want_red: AtomicBool::new(true),
         stop: stop.clone(),
     });
 
@@ -725,6 +731,16 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             continue;
         }
 
+        shared.peer_wants_red.store(h.red_wanted(), Ordering::Relaxed);
+
+        let (red, data) = match h.is_red() {
+            true => match star2_proto::split_red(payload) {
+                Some((prev, cur)) => (Some(prev.to_vec()), cur),
+                None => continue,
+            },
+            false => (None, payload),
+        };
+
         let arr_ms = base.elapsed().as_secs_f64() * 1000.0;
         let mut inbox = shared.inbox.lock().unwrap();
         let sb = inbox.entry(h.session).or_default();
@@ -737,7 +753,10 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
         sb.last_arr_ms = Some(arr_ms);
         sb.last_ts = Some(h.timestamp);
         sb.recv_count += 1;
-        sb.insert_capped(h.seq, AudioPkt { flags: h.flags, data: payload.to_vec(), arr: Instant::now() });
+        sb.insert_capped(
+            h.seq,
+            AudioPkt { flags: h.flags, data: data.to_vec(), red, arr: Instant::now() },
+        );
     }
 }
 
@@ -805,13 +824,12 @@ fn encode_loop(
         .context("create opus encoder")?;
     enc.set_bitrate(Bitrate::BitsPerSecond(bitrate)).context("opus bitrate")?;
 
-    let _ = enc.set_inband_fec(true);
-    let _ = enc.set_packet_loss_perc(5);
-
     let need = FRAME * send_ch;
     let mut pcm_f = vec![0.0f32; need];
     let mut pcm_i16 = vec![0i16; need];
     let mut dg = vec![0u8; MEDIA_HEADER_LEN + PKT_BUF];
+    let mut enc_buf = vec![0u8; PKT_BUF];
+    let mut red_prev: Vec<u8> = Vec::new();
     let base_flags = if send_ch == 2 { flags::STEREO } else { 0 };
     let (mut seq, mut ts) = (0u16, 0u32);
 
@@ -843,9 +861,35 @@ fn encode_loop(
             pcm_i16[i] = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
         }
         let session = shared.my_session();
-        if let Ok(len) = enc.encode(&pcm_i16, &mut dg[MEDIA_HEADER_LEN..]) {
-            MediaHeader::new(session, seq, ts, base_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
-            if sock.send_to(&dg[..MEDIA_HEADER_LEN + len], dst).is_ok() {
+        let mut hdr_flags = base_flags;
+        if shared.want_red.load(Ordering::Relaxed) {
+            hdr_flags |= flags::RED_WANTED;
+        }
+        if let Ok(len) = enc.encode(&pcm_i16, &mut enc_buf) {
+            let carry = shared.peer_wants_red.load(Ordering::Relaxed)
+                && !red_prev.is_empty()
+                && MEDIA_HEADER_LEN + RED_LEN_BYTES + red_prev.len() + len <= PKT_BUF;
+            let end = match carry {
+                true => {
+                    hdr_flags |= flags::RED;
+                    let at = MEDIA_HEADER_LEN;
+                    let n = red_prev.len();
+                    dg[at..at + RED_LEN_BYTES].copy_from_slice(&(n as u16).to_be_bytes());
+                    let at = at + RED_LEN_BYTES;
+                    dg[at..at + n].copy_from_slice(&red_prev);
+                    let at = at + n;
+                    dg[at..at + len].copy_from_slice(&enc_buf[..len]);
+                    at + len
+                }
+                false => {
+                    dg[MEDIA_HEADER_LEN..MEDIA_HEADER_LEN + len].copy_from_slice(&enc_buf[..len]);
+                    MEDIA_HEADER_LEN + len
+                }
+            };
+            red_prev.clear();
+            red_prev.extend_from_slice(&enc_buf[..len]);
+            MediaHeader::new(session, seq, ts, hdr_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
+            if sock.send_to(&dg[..end], dst).is_ok() {
                 shared.tx_pkts.fetch_add(1, Ordering::Relaxed);
                 shared.enc_sum_us.fetch_add(enc_start.elapsed().as_micros() as u64, Ordering::Relaxed);
                 shared.enc_n.fetch_add(1, Ordering::Relaxed);
@@ -877,6 +921,7 @@ fn playout_loop(
     let (mut win_played, mut win_concealed, mut win_recv) = (0u64, 0u64, 0u64);
     let mut win_contract = 0u64;
     let (mut win_late, mut win_resync, mut win_expand) = (0u64, 0u64, 0u64);
+    let (mut win_recovered, mut red_clean) = (0u64, 0u32);
 
     while !shared.stop.load(Ordering::Relaxed) {
 
@@ -1037,6 +1082,15 @@ fn playout_loop(
                 win_late = dec.late_dropped;
                 win_resync = dec.resyncs;
                 win_expand = sb.expanded;
+
+                if concealed + expands + (dec.recovered - win_recovered) > 0 {
+                    red_clean = 0;
+                } else {
+                    red_clean += 1;
+                }
+                win_recovered = dec.recovered;
+                shared.want_red.store(red_clean < RED_HOLD_S, Ordering::Relaxed);
+
                 shared.send_ctrl(ClientMsg::Stats {
                     loss_pct: loss,
                     jitter_ms: sb.est.mean_abs as f32,
