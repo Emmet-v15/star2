@@ -46,6 +46,14 @@ pub(crate) struct DecState {
     /// and the buffer stays empty) -> force a re-lock.
     pub(crate) dead: u32,
     pub(crate) dead_recv: u64,
+    /// Packets that arrived but were already behind the sequencer - they were in the
+    /// buffer and got thrown away unplayed. Distinguishes "the network lost it" from
+    /// "it turned up too late to use", which need opposite fixes.
+    pub(crate) late_dropped: u64,
+    /// Times the desync watchdog force-relatched. Each one discards a whole buffer.
+    pub(crate) resyncs: u64,
+    /// Consecutive ticks spent waiting for a late packet rather than concealing.
+    pub(crate) stalled: u32,
 }
 
 impl DecState {
@@ -57,6 +65,9 @@ impl DecState {
             started: false,
             dead: 0,
             dead_recv: 0,
+            late_dropped: 0,
+            resyncs: 0,
+            stalled: 0,
         })
     }
 
@@ -129,7 +140,12 @@ impl DecState {
             self.started = true;
         }
         let mut n = self.next.unwrap();
+        let before = pkts.len();
         pkts.retain(|&seq, _| !seq_lt(seq, n));
+        // Anything retain removed was a packet we HAD but had already played past:
+        // it arrived too late to be useful. That is a jitter-buffer sizing problem,
+        // not network loss, and the two are fixed in opposite directions.
+        self.late_dropped += (before - pkts.len()) as u64;
         // Far over target: drop ahead so we catch up instead of running a permanent
         // surplus of latency.
         if pkts.len() > target + SHED_MARGIN {
@@ -140,10 +156,26 @@ impl DecState {
         }
         let outcome = match pkts.remove(&n) {
             Some(pkt) => {
+                self.stalled = 0;
                 self.render(&pkt, out, scratch);
                 Playout::Rendered
             }
+            None if pkts.len() < target && self.stalled < target.max(1) as u32 => {
+                // The next packet hasn't arrived AND we are running shallower than
+                // the target depth. Do NOT burn its slot: concealing here advances
+                // the sequencer past it, so when it lands a moment later `retain`
+                // throws it away as late - concealment we could have avoided by
+                // simply waiting. Stalling re-deepens the queue toward the target,
+                // which is otherwise only ever enforced at the initial latch.
+                //
+                // Bounded by the target depth so a peer that genuinely stopped
+                // sending falls through to concealment instead of stalling forever.
+                self.stalled += 1;
+                out.iter_mut().for_each(|x| *x = 0.0);
+                return Playout::Idle; // note: `next` deliberately not advanced
+            }
             None => {
+                self.stalled = 0;
                 self.plc(out, scratch);
                 Playout::Concealed
             }
@@ -158,6 +190,8 @@ impl DecState {
     pub(crate) fn resync(&mut self, pkts: &mut HashMap<u16, AudioPkt>) {
         self.started = false;
         self.next = None;
+        self.stalled = 0;
+        self.resyncs += 1;
         pkts.clear();
     }
 }
@@ -258,6 +292,195 @@ impl SenderBuf {
             }
         }
         self.pkts.insert(seq, pkt);
+    }
+}
+
+#[cfg(test)]
+mod audio_fidelity {
+    //! Does audio actually survive the pipeline?
+    //!
+    //! The packet counters (`rx`/`play`/`loss`) only prove datagrams moved. They
+    //! would read perfectly while the output was silence, noise, or the wrong
+    //! channel. These tests push a known tone through the REAL path - Opus encode
+    //! at the engine's settings, packetise, jitter buffer, decode, upmix - and
+    //! measure the result.
+
+    use super::*;
+    use audiopus::coder::Encoder;
+    use audiopus::{Application, Bitrate};
+
+    /// Energy at `freq` in `samples` (stride-`step` deinterleave). Goertzel: one bin
+    /// of a DFT, which is all we need to ask "is the tone still there?".
+    fn tone_energy(samples: &[f32], step: usize, offset: usize, freq: f32) -> f32 {
+        let x: Vec<f32> = samples.iter().skip(offset).step_by(step).copied().collect();
+        let n = x.len() as f32;
+        let k = (0.5 + n * freq / SR as f32).floor();
+        let w = 2.0 * std::f32::consts::PI * k / n;
+        let (cw, sw) = (w.cos(), w.sin());
+        let coeff = 2.0 * cw;
+        let (mut q1, mut q2) = (0.0f32, 0.0f32);
+        for &s in &x {
+            let q0 = coeff * q1 - q2 + s;
+            q2 = q1;
+            q1 = q0;
+        }
+        let (re, im) = (q1 - q2 * cw, q2 * sw);
+        (re * re + im * im).sqrt() / n
+    }
+
+    fn rms(samples: &[f32], step: usize, offset: usize) -> f32 {
+        let x: Vec<f32> = samples.iter().skip(offset).step_by(step).copied().collect();
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// Run `frames` frames of `ch`-channel audio from `gen` through encode -> packet
+    /// -> SenderBuf -> produce, returning (interleaved stereo playout, conceal count).
+    ///
+    /// Packets are fed ONE PER PLAYOUT TICK, which is what actually happens on the
+    /// wire. Inserting them all up front instead looks like a hugely over-full
+    /// buffer, and `SHED_MARGIN` correctly discards almost all of them to catch up -
+    /// so the naive version measures the shedder, not the codec.
+    ///
+    /// `keep` decides whether frame `f`'s packet "arrives", for loss testing.
+    fn through_pipeline(
+        ch: usize,
+        frames: usize,
+        gen: impl Fn(usize, usize) -> f32,
+        keep: impl Fn(usize) -> bool,
+    ) -> (Vec<f32>, usize) {
+        let channels = if ch == 2 { Channels::Stereo } else { Channels::Mono };
+        let mut enc = Encoder::new(SampleRate::Hz48000, channels, Application::LowDelay).unwrap();
+        enc.set_bitrate(Bitrate::BitsPerSecond(128_000)).unwrap();
+
+        let mut sb = SenderBuf::default();
+        let flags = if ch == 2 { star2_proto::flags::STEREO } else { 0 };
+        let mut pcm = vec![0i16; FRAME * ch];
+        let mut payload = vec![0u8; 4096];
+
+        let mut dec = DecState::new().unwrap();
+        let mut out = Vec::with_capacity(frames * STEREO_FRAME);
+        let mut frame = vec![0.0f32; STEREO_FRAME];
+        let mut scratch = vec![0i16; FRAME * 2];
+        let mut concealed = 0;
+
+        for f in 0..frames {
+            for i in 0..FRAME {
+                for c in 0..ch {
+                    let s = gen(f * FRAME + i, c).clamp(-1.0, 1.0);
+                    pcm[i * ch + c] = (s * 32767.0) as i16;
+                }
+            }
+            let n = enc.encode(&pcm, &mut payload).unwrap();
+            if keep(f) {
+                sb.insert_capped(f as u16, AudioPkt { flags, data: payload[..n].to_vec() });
+            }
+            // target 1: play as soon as a packet is available, no pre-buffering.
+            match dec.produce(&mut sb.pkts, 1, &mut frame, &mut scratch) {
+                Playout::Rendered => out.extend_from_slice(&frame),
+                Playout::Concealed => {
+                    concealed += 1;
+                    out.extend_from_slice(&frame);
+                }
+                Playout::Idle => {}
+            }
+        }
+        (out, concealed)
+    }
+
+    fn all(_: usize) -> bool {
+        true
+    }
+
+    /// A 1 kHz mono tone must come out as a 1 kHz tone at roughly the same level -
+    /// not silence, not noise, and not attenuated into inaudibility.
+    #[test]
+    fn mono_tone_survives_the_pipeline() {
+        let tone = |i: usize, _c: usize| {
+            (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+        };
+        let (out, _) = through_pipeline(1, 60, tone, all);
+        assert!(!out.is_empty(), "pipeline produced nothing at all");
+
+        // Skip the first frames: Opus needs a moment to converge, and comparing
+        // against its warm-up would make this test flaky rather than meaningful.
+        let steady = &out[20 * STEREO_FRAME..];
+
+        let level = rms(steady, 2, 0);
+        assert!(level > 0.2, "output far too quiet (rms {level}) - silence or a scaling bug");
+        assert!(level < 0.6, "output far too loud (rms {level}) - a scaling bug");
+
+        let at_1k = tone_energy(steady, 2, 0, 1000.0);
+        let at_3k = tone_energy(steady, 2, 0, 3000.0);
+        assert!(
+            at_1k > at_3k * 10.0,
+            "1 kHz tone did not survive: 1k={at_1k:.5} vs 3k={at_3k:.5} - output is noise, not the input"
+        );
+    }
+
+    /// Mono must be duplicated to both ears, not left in one.
+    #[test]
+    fn mono_upmixes_to_both_channels() {
+        let tone = |i: usize, _c: usize| {
+            (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+        };
+        let (out, _) = through_pipeline(1, 40, tone, all);
+        let steady = &out[20 * STEREO_FRAME..];
+        for (i, pair) in steady.chunks(2).enumerate() {
+            assert_eq!(pair[0], pair[1], "L/R differ at frame {i} - mono did not upmix");
+        }
+    }
+
+    /// Stereo must keep the ears apart: a tone in L only must not appear in R.
+    /// This is the test that would catch an interleaving or channel-order bug.
+    #[test]
+    fn stereo_keeps_channels_separate() {
+        let split = |i: usize, c: usize| {
+            if c == 0 {
+                (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+            } else {
+                0.0
+            }
+        };
+        let (out, _) = through_pipeline(2, 60, split, all);
+        let steady = &out[20 * STEREO_FRAME..];
+
+        let l = tone_energy(steady, 2, 0, 1000.0);
+        let r = tone_energy(steady, 2, 1, 1000.0);
+        assert!(l > 0.05, "left channel lost the tone (l={l:.5})");
+        // Opus joint-stereo bleeds a little; demand clear separation, not perfection.
+        assert!(l > r * 5.0, "channels bled together: l={l:.5} r={r:.5}");
+    }
+
+    /// Silence in, silence out - a DC offset or noise floor here would be audible hiss.
+    #[test]
+    fn silence_stays_silent() {
+        let (out, _) = through_pipeline(1, 40, |_, _| 0.0, all);
+        let steady = &out[20 * STEREO_FRAME..];
+        let level = rms(steady, 2, 0);
+        assert!(level < 0.01, "silence produced output (rms {level})");
+    }
+
+    /// A dropped packet must be concealed, not desync the stream: the tone has to
+    /// still be there afterwards.
+    #[test]
+    fn tone_survives_lost_packets() {
+        let tone = |i: usize, _c: usize| {
+            (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / SR as f32).sin() * 0.5
+        };
+        // Drop every 10th packet on the floor - 10% loss, worse than a real link.
+        let (out, concealed) = through_pipeline(1, 80, tone, |f| f % 10 != 3);
+        assert!(concealed >= 5, "expected the dropped packets to conceal, got {concealed}");
+
+        let steady = &out[20 * STEREO_FRAME..];
+        let at_1k = tone_energy(steady, 2, 0, 1000.0);
+        let at_3k = tone_energy(steady, 2, 0, 3000.0);
+        assert!(
+            at_1k > at_3k * 5.0,
+            "tone lost after concealment: 1k={at_1k:.5} 3k={at_3k:.5}"
+        );
+        // PLC should hold the level up, not drop out into near-silence.
+        let level = rms(steady, 2, 0);
+        assert!(level > 0.15, "concealment left the audio too quiet (rms {level})");
     }
 }
 

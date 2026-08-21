@@ -823,6 +823,7 @@ fn playout_loop(
     let mut last_stats = Instant::now();
     // Previous-window counters, so the readout is per-second rather than lifetime.
     let (mut win_played, mut win_concealed, mut win_recv) = (0u64, 0u64, 0u64);
+    let (mut win_late, mut win_resync) = (0u64, 0u64);
 
     while !shared.stop.load(Ordering::Relaxed) {
         // FILL-DRIVEN pacing: the output device is the master clock. We emit a frame
@@ -926,14 +927,41 @@ fn playout_loop(
                 win_concealed = sb.concealed;
                 win_recv = sb.recv_count;
                 let loss = if played > 0 { concealed as f32 / played as f32 * 100.0 } else { 0.0 };
+                let buf_ms = sb.target_frames as f64 * FRAME_MS as f64;
+                let out_ms =
+                    out_fill.load(Ordering::Relaxed) as f64 / STEREO_FRAME as f64 * FRAME_MS as f64;
+                let rx_pps = (rx as f64 / secs).round() as u64;
+                let play_fps = (played as f64 / secs).round() as u64;
                 on_event(Event::Stats {
                     jitter_ms: sb.est.mean_abs,
-                    target_ms: sb.target_frames as f64 * FRAME_MS as f64,
+                    target_ms: buf_ms,
                     loss_pct: loss,
-                    out_ms: out_fill.load(Ordering::Relaxed) as f64 / STEREO_FRAME as f64
-                        * FRAME_MS as f64,
-                    rx_pps: (rx as f64 / secs).round() as u64,
-                    play_fps: (played as f64 / secs).round() as u64,
+                    out_ms,
+                    rx_pps,
+                    play_fps,
+                });
+                // Mirror to the server so call quality is visible without access to
+                // either machine. Best-effort: dropped silently if signalling is down.
+                let path = match shared.p2p.lock().unwrap().phase {
+                    P2pPhase::Direct => "direct",
+                    P2pPhase::Punching => "punching",
+                    P2pPhase::Failed => "failed",
+                    P2pPhase::Idle => "idle",
+                };
+                let late = dec.late_dropped - win_late;
+                let resyncs = dec.resyncs - win_resync;
+                win_late = dec.late_dropped;
+                win_resync = dec.resyncs;
+                shared.send_ctrl(ClientMsg::Stats {
+                    loss_pct: loss,
+                    jitter_ms: sb.est.mean_abs as f32,
+                    buf_ms: buf_ms as u32,
+                    out_ms: out_ms as u32,
+                    rx_pps: rx_pps as u32,
+                    play_fps: play_fps as u32,
+                    late_pps: (late as f64 / secs).round() as u32,
+                    resyncs: resyncs as u32,
+                    path: path.into(),
                 });
             }
         }

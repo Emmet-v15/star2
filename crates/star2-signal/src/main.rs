@@ -274,6 +274,26 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             App::send(&hub, me, ServerMsg::Room { room, members });
         }
         ClientMsg::Leave => App::leave_room(&mut hub, me),
+        // Diagnostics only - log and drop. Tagged with the name so two peers in a
+        // call can be told apart in journalctl.
+        ClientMsg::Stats {
+            loss_pct,
+            jitter_ms,
+            buf_ms,
+            out_ms,
+            rx_pps,
+            play_fps,
+            late_pps,
+            resyncs,
+            path,
+        } => {
+            let name = hub.sessions.get(&me).map(|s| s.name.as_str()).unwrap_or("?");
+            eprintln!(
+                "[stats] {name}(s{me}) path={path} loss={loss_pct:.1}% late={late_pps}/s \
+                 resync={resyncs} jitter={jitter_ms:.1}ms buf={buf_ms}ms out={out_ms}ms \
+                 rx={rx_pps}/s play={play_fps}/s"
+            );
+        }
         // P2P signaling: forward verbatim, stamping `from`, but only within a room.
         ClientMsg::P2pOffer { to, nonce, cands } => {
             forward(&hub, me, to, ServerMsg::P2pOffer { from: me, nonce, cands })

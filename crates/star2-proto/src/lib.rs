@@ -41,7 +41,8 @@ pub mod flags {
 // ---------------------------------------------------------------------------
 
 /// Messages sent client -> signal server over the WebSocket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// No `Eq`: the Stats variant carries f32s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ClientMsg {
     /// First message on every connection. `ver` is [`PROTO_VERSION`].
@@ -51,6 +52,25 @@ pub enum ClientMsg {
     Join { room: String },
     /// Leave the current room (stay connected).
     Leave,
+    /// 1 Hz health report, so call quality can be observed from the server without
+    /// access to either machine. Purely diagnostic: the server logs it and does
+    /// nothing else with it, and media never depends on it arriving.
+    Stats {
+        loss_pct: f32,
+        jitter_ms: f32,
+        buf_ms: u32,
+        out_ms: u32,
+        rx_pps: u32,
+        play_fps: u32,
+        /// Packets that arrived too late to play, per second. Non-zero here means
+        /// the jitter buffer is too SHALLOW; genuine network loss leaves it at zero.
+        late_pps: u32,
+        /// Desync re-latches in this window. Each one dumps a whole buffer, so even
+        /// one per second is a large share of the concealment.
+        resyncs: u32,
+        /// "direct" once punched, otherwise the phase we're stuck in.
+        path: String,
+    },
     // --- P2P signaling: forwarded same-room-only, unicast to `to` ---
     /// Controller -> answerer: offer a direct path. `nonce` is the credential inbound
     /// probes to *this* sender must echo; `cands` are its candidate `ip:port`s.
