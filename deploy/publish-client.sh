@@ -81,15 +81,15 @@ echo "==> manifest $VER $SHA"
 scp -q deploy/star2-mac.sh "$HOST:/tmp/star2-mac.sh"
 ssh "$HOST" "sudo -n mv -f /tmp/star2-mac.sh $WEBROOT/star2-mac.sh && sudo -n chmod 644 $WEBROOT/star2-mac.sh"
 
-# Nudge every connected updater to re-check. Non-fatal: the updater polls anyway,
-# so a failed notify only delays the rollout, it doesn't break it.
-if [ -n "${STAR2_TOKEN:-}" ]; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-        -H "x-token: $STAR2_TOKEN" https://star.v15.studio/star2/notify || true)
-    echo "==> notify: HTTP $code"
-else
-    echo "==> notify skipped (set STAR2_TOKEN to push instantly)"
-fi
+# Push to every connected updater. This ALWAYS runs - publishing without it
+# leaves people on the old build until they happen to reconnect, which is the
+# whole failure this is meant to prevent. The token is read off the relay when
+# it isn't already in the environment, so there is no way to "forget" it.
+TOKEN="${STAR2_TOKEN:-$(ssh "$HOST" "grep '^STAR2_TOKEN=' /home/opc/star2/star2.env | cut -d= -f2")}"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "x-token: $TOKEN" https://star.v15.studio/star2/notify || true)
+echo "==> notify: HTTP $code"
+[ "$code" = "200" ] || { echo "notify FAILED - clients will not update until they reconnect" >&2; exit 1; }
 
 echo "==> published https://v15.studio/$REMOTE"
 if [ "${1:-}" = "--check" ]; then

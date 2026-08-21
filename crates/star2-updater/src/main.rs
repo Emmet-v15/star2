@@ -102,7 +102,7 @@ async fn run_session(
     let (mut tx_ws, mut rx) = ws.split();
     let _ = tx_ws.send(Message::Text(env!("CARGO_PKG_VERSION").into())).await;
 
-    if check_and_apply(exe, me, args, sup).await {
+    if check_and_apply(exe, me, args, sup, false).await {
         return Ok(true);
     }
 
@@ -113,8 +113,7 @@ async fn run_session(
         tokio::select! {
             msg = rx.next() => match msg {
                 Some(Ok(_)) => {
-                    println!("[star2] update announced");
-                    if check_and_apply(exe, me, args, sup).await {
+                    if check_and_apply(exe, me, args, sup, true).await {
                         return Ok(true);
                     }
                 }
@@ -258,6 +257,7 @@ async fn check_and_apply(
     me: &Path,
     args: &[String],
     sup: &mut Supervisor,
+    announced: bool,
 ) -> bool {
     let Some(manifest) = fetch_or_warn().await else { return false };
 
@@ -266,7 +266,13 @@ async fn check_and_apply(
     }
 
     if !is_stale(exe, &manifest.sha256) {
+        if announced {
+            println!("[star2] {} announced - already on it", manifest.version);
+        }
         return false;
+    }
+    if announced {
+        println!("[star2] {} announced", manifest.version);
     }
     println!("[star2] downloading build {}", manifest.version);
 
