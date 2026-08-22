@@ -1042,6 +1042,11 @@ fn playout_loop(
     let (mut win_recovered, mut red_clean) = (0u64, 0u32);
 
     while !shared.stop.load(Ordering::Relaxed) {
+        if shared.paused.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+            last_stats = Instant::now();
+            continue;
+        }
 
         if master.occupied_len() >= out_target.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(1));
