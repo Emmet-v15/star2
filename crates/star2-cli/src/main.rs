@@ -193,7 +193,7 @@ fn hand_over(me: &Path, args: &[String], call: &CallHandle) -> Result<bool> {
     }
 
     call.stop_receiving();
-    successor.cut_over(call.media_cursor())?;
+    successor.cut_over(call.hand_off_point())?;
     std::thread::sleep(handover::SEND_OVERLAP);
     println!("handed the call to the new build");
     Ok(true)

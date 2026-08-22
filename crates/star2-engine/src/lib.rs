@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -175,17 +175,18 @@ impl CallHandle {
         self.shared.rx_stop.store(true, Ordering::Relaxed);
     }
 
-    pub fn media_cursor(&self) -> handover::Cutover {
+    pub fn hand_off_point(&self) -> handover::Cutover {
+        let lead = handover::SEND_OVERLAP.as_millis() as u32 / FRAME_MS;
         handover::Cutover {
-            seq: self.shared.seq.load(Ordering::Relaxed) as u16,
-            ts: self.shared.ts.load(Ordering::Relaxed),
+            seq: (self.shared.seq.load(Ordering::Relaxed) as u16).wrapping_add(lead as u16),
+            ts: self.shared.ts.load(Ordering::Relaxed).wrapping_add(lead * FRAME as u32),
         }
     }
 
     pub fn resume_from(&self, at: handover::Cutover) {
         self.shared.seq.store(at.seq as u32, Ordering::Relaxed);
         self.shared.ts.store(at.ts, Ordering::Relaxed);
-        self.shared.paused.store(false, Ordering::Relaxed);
+        self.shared.paused.store(false, Ordering::Release);
     }
 }
 
@@ -351,9 +352,6 @@ where
     let in_rate = in_cfg.sample_rate().0;
     let out_rate = out_cfg.sample_rate().0;
 
-    if out_rate != SR {
-        bail!("output device must be 48 kHz (got {out_rate}Hz)");
-    }
     let in_ch = in_cfg.channels() as usize;
     let out_ch = out_cfg.channels() as usize;
 
@@ -367,6 +365,9 @@ where
     let err_fn = |e| log_line(format!("audio {e}"));
     if in_rate != SR {
         debug_line(format!("[engine] resampling mic {in_rate}Hz -> {SR}Hz"));
+    }
+    if out_rate != SR {
+        debug_line(format!("[engine] resampling playout {SR}Hz -> {out_rate}Hz"));
     }
 
     let in_stream = {
@@ -417,6 +418,10 @@ where
         cfg2.buffer_size = buffer_size_for(out_cfg.buffer_size(), cfg.dev_buf_ms);
         let underruns = underruns.clone();
         let sh_out = shared.clone();
+        let mut resamp = Resampler::new(SR, out_rate, 2);
+        let mut block: Vec<f32> = Vec::with_capacity(STEREO_FRAME);
+        let mut resampled: Vec<f32> = Vec::with_capacity(STEREO_FRAME * 2);
+        let mut ready: VecDeque<f32> = VecDeque::with_capacity(STEREO_FRAME * 4);
         output.build_output_stream(
             &cfg2,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
@@ -424,17 +429,28 @@ where
                 if let Some(d) = t.playback.duration_since(&t.callback) {
                     sh_out.dev_out_us.store(d.as_micros() as u32, Ordering::Relaxed);
                 }
+                let want = data.len() / out_ch * 2;
+                while ready.len() < want {
+                    block.clear();
+                    for _ in 0..FRAME {
+                        let l = match master_cons.try_pop() {
+                            Some(v) => v,
+                            None => {
+                                underruns.fetch_add(1, Ordering::Relaxed);
+                                0.0
+                            }
+                        };
+                        block.push(l);
+                        block.push(master_cons.try_pop().unwrap_or(0.0));
+                    }
+                    resampled.clear();
+                    resamp.process(&block, &mut resampled);
+                    ready.extend(resampled.iter().copied());
+                }
                 let mut i = 0;
                 while i + out_ch <= data.len() {
-
-                    let l = match master_cons.try_pop() {
-                        Some(v) => v,
-                        None => {
-                            underruns.fetch_add(1, Ordering::Relaxed);
-                            0.0
-                        }
-                    };
-                    let r = master_cons.try_pop().unwrap_or(0.0);
+                    let l = ready.pop_front().unwrap_or(0.0);
+                    let r = ready.pop_front().unwrap_or(0.0);
                     if out_ch == 1 {
                         data[i] = 0.5 * (l + r);
                     } else {
@@ -828,9 +844,7 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
         let sb = inbox.entry(header.session).or_default();
         if let (Some(la), Some(lt)) = (sb.last_arr_ms, sb.last_ts) {
 
-            let d_arr = arr_ms - la;
-            let d_ts = (header.timestamp.wrapping_sub(lt)) as f64 / (SR as f64 / 1000.0);
-            sb.est.observe((d_arr - d_ts).abs());
+            sb.est.observe(arrival_skew_ms(arr_ms - la, header.timestamp, lt));
         }
         sb.last_arr_ms = Some(arr_ms);
         sb.last_ts = Some(header.timestamp);
@@ -887,6 +901,11 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
     }
 }
 
+fn arrival_skew_ms(d_arr_ms: f64, ts: u32, last_ts: u32) -> f64 {
+    let d_ts = (ts.wrapping_sub(last_ts) as i32) as f64 / (SR as f64 / 1000.0);
+    (d_arr_ms - d_ts).abs()
+}
+
 fn encode_loop(
     shared: &Arc<Shared>,
     sock: &UdpSocket,
@@ -907,19 +926,24 @@ fn encode_loop(
     let mut red_prev: Vec<u8> = Vec::new();
     let base_flags = if send_ch == 2 { flags::STEREO } else { 0 };
     let (mut seq, mut ts) = (0u16, 0u32);
+    let mut resuming = false;
 
     while !shared.stop.load(Ordering::Relaxed) {
         if in_cons.occupied_len() < need {
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
-        if shared.paused.load(Ordering::Relaxed) {
+        if shared.paused.load(Ordering::Acquire) {
             for _ in 0..need {
                 let _ = in_cons.try_pop();
             }
+            resuming = true;
+            continue;
+        }
+        if resuming {
+            resuming = false;
             seq = shared.seq.load(Ordering::Relaxed) as u16;
             ts = shared.ts.load(Ordering::Relaxed);
-            continue;
         }
         let ring_us = (in_cons.occupied_len() as u64 * 1_000_000)
             / (SR as u64 * send_ch as u64);
@@ -1240,6 +1264,18 @@ fn playout_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rewound_timestamp_is_read_as_a_small_step_not_a_lifetime_of_jitter() {
+        let frame = FRAME as u32;
+        let steady = arrival_skew_ms(5.0, 100 * frame, 99 * frame);
+        let rewound = arrival_skew_ms(5.0, 99 * frame, 100 * frame);
+        assert!(steady < 1.0, "a frame arriving on time read as {steady}ms of skew");
+        assert!(
+            rewound < 20.0,
+            "a timestamp one frame behind read as {rewound}ms of jitter, which pins the peer's              buffer at its ceiling and stalls playout"
+        );
+    }
 
     #[test]
     fn frame_math() {
