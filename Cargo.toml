@@ -4,7 +4,7 @@ members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "
 
 [workspace.package]
 edition = "2021"
-version = "0.3.3"
+version = "0.3.4"
 license = "MIT"
 
 [workspace.dependencies]
