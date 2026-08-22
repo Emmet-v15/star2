@@ -44,7 +44,7 @@ star2.exe --room general --name me
 ```
 
 There is **one** binary and it updates itself. On startup — and again whenever the
-relay nudges it — it compares its own SHA-256 against the manifest, and if they
+signalling server nudges it — it compares its own SHA-256 against the manifest, and if they
 differ it downloads the new build, renames itself to `star2.old`, moves the new one
 into place and relaunches with the same arguments.
 
@@ -59,7 +59,7 @@ one, which is what makes that work without a second supervising process.
 | WebSocket push | instant — `publish-client.sh` POSTs `/star2/notify`, the server fans out a nudge |
 | on reconnect | catches builds shipped while the socket was down |
 
-Push-only; there is no polling loop. Nothing here depends on the relay being up: if
+Push-only; there is no polling loop. Nothing here depends on the signalling server being up: if
 the manifest or the socket is unreachable, star2 warns and runs the build it has.
 
 The nudge carries no payload beyond "go look again". The manifest and binary are
@@ -150,7 +150,7 @@ Not yet verified:
 
 - **Windows only.** macOS and Android are out of scope until there is a plan that
   isn't a hand-rolled toolchain per platform.
-- **No relay fallback, by design.** A failed punch ends the call. Symmetric NAT and
+- **Media never falls back through the signalling server, by design.** A failed punch ends the call. Symmetric NAT and
   CGNAT (mobile data especially) are the cases that will fail.
 - A failed punch is fatal rather than dropping back to idle to wait for the peer.
 - 1:1 only — a third peer in a room ends the call rather than mixing.

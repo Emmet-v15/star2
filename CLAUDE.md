@@ -41,11 +41,11 @@ merged version is slightly worse at the edges.
 
 - P2P voice, 1:1, low latency. That is the product.
 - **Seamless self-update is a headline feature, not plumbing.** See §8.
-- **Signalling only** — the relay brokers the hole punch and answers reflexive
-  probes. Media never passes through it. **No relay fallback.** A failed punch
-  ends the call.
-- **Must not depend on the relay being up.** A call already in progress survives
-  the relay going away.
+- **Signalling only** — the signalling server brokers the hole punch and answers
+  reflexive probes. Media never passes through it and **never falls back through
+  it.** A failed punch ends the call.
+- **Must not depend on the signalling server being up.** A call already in
+  progress survives the signalling server going away.
 - No UI beyond the terminal.
 - Windows is the target. macOS and Android are out of scope until there is a
   plan that does not cost more than the feature is worth.
@@ -77,7 +77,7 @@ merged version is slightly worse at the edges.
 
 ## 8. Updates are seamless, including mid-call
 
-The relay says a new build exists; the client is running it moments later. No
+The signalling server says a new build exists; the client is running it moments later. No
 prompt, no restart the user has to perform, and **no dropped call** — a peer
 mid-conversation upgrades without either side hearing it happen. This is a goal
 of the project in its own right, not a detail of the build pipeline. Cost that

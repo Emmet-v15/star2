@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile the signal server and deploy it to the relay box.
+# Cross-compile the signal server and deploy it to the signalling box.
 #
 # The signal server is pure Rust, so this needs only cargo-zigbuild + zig - no
 # toolchain on the server (there isn't one). Re-running is safe: it replaces the

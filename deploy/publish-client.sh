@@ -60,8 +60,9 @@ echo "==> manifest $VER $SHA"
 
 # Push to every connected client. This ALWAYS runs - publishing without it
 # leaves people on the old build until they happen to reconnect, which is the
-# whole failure this is meant to prevent. The token is read off the relay when
-# it isn't already in the environment, so there is no way to "forget" it.
+# whole failure this is meant to prevent. The token is read off the signalling
+# server when it isn't already in the environment, so there is no way to
+# "forget" it.
 TOKEN="${STAR2_TOKEN:-$(ssh "$HOST" "grep '^STAR2_TOKEN=' /home/opc/star2/star2.env | cut -d= -f2")}"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "x-token: $TOKEN" https://star.v15.studio/star2/notify || true)

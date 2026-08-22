@@ -553,7 +553,7 @@ async fn control_loop(
                         };
 
                         if peer == Some(session) && phase == P2pPhase::Direct {
-                            on_event(Event::Status("peer left relay, direct path up".into()));
+                            on_event(Event::Status("peer left signalling, direct path up".into()));
                         } else if peer == Some(session) {
 
                             go_idle(&shared, "peer left");
