@@ -1,5 +1,0 @@
-update 0.3.3 downloading
-update 0.3.3 installed
-[star2] 0.3.3 joining selftest-out as "1337Desktop" (mono, 128 kbps)
-[star2] waiting for your peer to join selftest-out
-[star2] 1337Desktop joined
