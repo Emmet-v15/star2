@@ -18,6 +18,7 @@ use star2_proto::{
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 mod audio;
+pub mod handover;
 mod p2p;
 mod playout;
 
