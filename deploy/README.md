@@ -5,7 +5,7 @@ idempotent and safe to re-run.
 
 | file | what it does |
 |---|---|
-| `publish-client.sh` | build the client for the current platform, upload to `v15.studio/star2.exe` (or `-macos` / `-linux`) |
+| `publish-client.sh` | build `star2.exe`, upload it to `v15.studio/star2.exe`, write the manifest, nudge every connected client |
 | `deploy-signal.sh` | cross-compile the signal server to aarch64 and restart it on empire |
 | `star2-signal.service` | the systemd unit as installed on empire |
 | `nginx-star2.conf` | the nginx location block added to v1's vhost |
@@ -16,9 +16,9 @@ idempotent and safe to re-run.
 ./deploy/publish-client.sh --check
 ```
 
-Run it from the platform you're publishing for — `audiopus_sys` compiles libopus
-from source for the host arch, so there's no cross-build shortcut for the client.
-The signal server is the opposite: pure Rust, so it cross-compiles fine.
+Run it from Windows — `audiopus_sys` compiles libopus from source for the host
+arch, so there's no cross-build shortcut for the client, and Windows is the only
+platform we ship. The signal server is the opposite: pure Rust, cross-compiles fine.
 
 ## Deploy the signal server
 
@@ -48,7 +48,7 @@ Both are already applied for 40001/udp. The OCI ingress rule was added with the
 
 ## CI
 
-`.github/workflows/build.yml` builds Windows and macOS clients plus the aarch64
+`.github/workflows/build.yml` builds the Windows client plus the aarch64
 signal server. **Artifact upload currently fails**: the account's Actions artifact
 storage quota is full (star v1's CI uploads an ~80 MB AppImage and an APK on every
 run). Until that's cleared, publish with `publish-client.sh` — which is also why

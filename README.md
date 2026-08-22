@@ -14,9 +14,13 @@ Android AAudio, so asking for 44.1 kHz would force a resample on *every* platfor
 while 48 kHz usually forces none.
 
 The wire format is lossy-but-transparent rather than lossless on purpose. On a UDP
-path, packet loss dominates quantisation noise you cannot hear: Opus can conceal a
-lost frame (PLC) and rebuild it from the next one (in-band FEC), while FLAC would
+path, packet loss dominates quantisation noise you cannot hear: a lost frame can be
+concealed (PLC) or recovered from a copy carried in the next packet, while FLAC would
 turn the same loss into an audible hole and make jitter-buffer sizing harder.
+
+Opus' own in-band FEC is not available to us: LBRR is SILK-only and SILK's shortest
+frame is 10 ms, so at 5 ms frames Opus is CELT-only and `set_inband_fec` is a silent
+no-op. That is why redundancy is done at the packet layer instead — see below.
 
 ## Layout
 
@@ -25,37 +29,38 @@ turn the same loss into an audible hole and make jitter-buffer sizing harder.
 | `star2-proto`  | wire types: media header, punch probe, signalling JSON |
 | `star2-signal` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
 | `star2-engine` | client core: capture → Opus → UDP → jitter buffer → playback |
-| `star2-cli`    | the `star2` binary; the CLI is the whole UI |
+| `star2-cli`    | the `star2` binary: CLI, self-update. The CLI is the whole UI |
 
 The jitter buffer and hole-punch FSM are ported from star v1, which is where that
 tuning was worked out.
 
 ## Running
 
-Download `star2.exe` from v15.studio once and run it. It fetches the engine itself:
+Download `star2.exe` from v15.studio once and run it. Run it with no arguments and
+it asks for a room token; blank makes a new one.
 
 ```sh
 star2.exe --room general --name me
 ```
 
-`star2` is the **runner**: it verifies the engine's SHA-256 against the manifest,
-downloads it if stale, then launches and supervises it. Every flag is passed
-straight through. `star2-engine` is the actual voice client and can be run
-directly — you just don't get auto-update.
+There is **one** binary and it updates itself. On startup — and again whenever the
+relay nudges it — it compares its own SHA-256 against the manifest, and if they
+differ it downloads the new build, renames itself to `star2.old`, moves the new one
+into place and relaunches with the same arguments.
 
-The split exists because Windows won't overwrite a running image, so something has
-to outlive the engine to replace it. It also means the part that changes often
-(the engine) is the part that auto-updates, while the supervisor rarely moves.
+Windows forbids *deleting or overwriting* a running image but permits *renaming*
+one, which is what makes that work without a second supervising process.
 
 ### How updates arrive
 
 | path | when |
 |---|---|
+| startup | before the call starts, so a cold launch is never stale |
 | WebSocket push | instant — `publish-client.sh` POSTs `/star2/notify`, the server fans out a nudge |
-| on connect | once per connection, catching builds shipped while the runner was offline |
+| on reconnect | catches builds shipped while the socket was down |
 
-Push-only; there is no polling loop. A dropped socket reconnects, and the check on
-reconnect covers anything missed while it was down.
+Push-only; there is no polling loop. Nothing here depends on the relay being up: if
+the manifest or the socket is unreachable, star2 warns and runs the build it has.
 
 The nudge carries no payload beyond "go look again". The manifest and binary are
 fetched over TLS and checked against the manifest's SHA-256, so a forged nudge can
@@ -63,23 +68,27 @@ at worst cause a wasted re-download. It is **not** a signature: anyone who can
 write the webroot can ship a build, which is the same trust boundary as the
 download itself.
 
-A missing or corrupt engine simply fails the hash comparison and is reinstalled,
-so the runner repairs itself rather than bricking.
+There is no crash supervisor. If star2 dies, you start it again.
 
 Both peers must pass the same `--room`. The lower session id becomes the punch
 controller, so glare can't happen.
 
 | flag | default | meaning |
 |---|---|---|
-| `--url` | `ws://127.0.0.1:9101` | signal server |
-| `--room` | `general` | both peers must match |
+| `--url` | `wss://star.v15.studio/star2` | signal server |
+| `--room` | prompted | both peers must match |
+| `--create <NAME>` | | mint a new room token, print it, join it |
 | `--name` | hostname | display name |
-| `--token` | `star2-dev` | shared secret |
+| `--token` | baked in | shared secret |
 | `--stereo` | off | send 2 channels instead of 1 |
 | `--bitrate` | 128k mono / 256k stereo | Opus bitrate |
 | `--input` / `--output` | system default | device name substring |
 | `--dev-buf <MS>` | 0 (device default) | device buffer request; lower = less latency |
+| `--stats` | off | 1 Hz jitter/loss/rate readout |
+| `--verbose` | off | audio/punching/jitter internals |
 | `--list-devices` | | print devices and exit |
+
+`--create` mints a **new** token every run; use `--room` to return to an existing one.
 
 ## Latency
 
@@ -91,6 +100,20 @@ each time it flaps so a marginal device settles instead of oscillating.
 If capture granularity is coarse (packets leave in bursts), receivers read that as
 jitter and size the buffer up. `--dev-buf 5` asks for a smaller device buffer and
 usually shrinks the far end's buffer with it.
+
+The buffer only ever grows or sheds in bulk. It never discards a frame to trim
+itself — deliberately dropping good audio to save a few milliseconds is a glitch you
+can hear, and the latency it buys back is not worth it.
+
+## Loss
+
+Each packet can carry a copy of the previous frame's Opus payload. When a packet
+goes missing, the gap is filled from its successor's copy instead of being concealed,
+which costs one extra frame of nothing (the successor was already in the buffer).
+
+It is negotiated, not always on: a receiver sets `RED_WANTED` on its own outgoing
+packets while it is seeing loss and for 10 s after, and a sender only doubles up for
+a peer that asked. A clean link pays nothing.
 
 ## Deploying the signal server
 
@@ -116,17 +139,20 @@ firewalld can be wide open and packets will still never reach the box without it
 Verified:
 - Two clients, punch confirmed in 60–160 ms, audio both ways, 0% loss.
 - Reflexive discovery through the real NAT (`wss://` signalling + UDP 40001).
-- 19 unit tests: wire round-trips, punch authorisation, jitter estimator, resampler.
+- 45 unit tests: wire round-trips, punch authorisation, jitter estimator, resampler,
+  room tokens, argument resolution, packet redundancy.
 
 Not yet verified:
 - A punch between two *different* networks. Both test peers shared a LAN candidate,
   so the reflexive path has been discovered but not yet traversed end to end.
-- macOS and Android. CI builds macOS artifacts; Android is not started.
 
 ## Known gaps
 
+- **Windows only.** macOS and Android are out of scope until there is a plan that
+  isn't a hand-rolled toolchain per platform.
 - **No relay fallback, by design.** A failed punch ends the call. Symmetric NAT and
   CGNAT (mobile data especially) are the cases that will fail.
+- A failed punch is fatal rather than dropping back to idle to wait for the peer.
 - 1:1 only — a third peer in a room ends the call rather than mixing.
 - No encryption of the media payload. The punch nonce is protected by the
   signalling TLS, so an off-path attacker cannot redirect media, but an on-path one

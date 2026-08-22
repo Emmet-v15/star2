@@ -10,51 +10,25 @@ permissions:
 
 jobs:
   client:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            name: windows-x64
-          - os: macos-latest
-            name: macos-arm64
-          - os: macos-13
-            name: macos-x64
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      # audiopus_sys compiles libopus from source, which needs autotools. Windows
-      # uses the MSVC path and doesn't. cpal itself needs nothing extra here:
-      # CoreAudio and WASAPI are system frameworks.
-      - name: Autotools (audiopus_sys builds libopus from source)
-        if: runner.os == 'macOS'
-        run: brew install -q autoconf automake libtool
-
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # libopus is built for the host arch, so each runner produces a native
-      # binary - macos-latest is Apple Silicon, macos-13 is Intel.
       - name: Build client
-        run: cargo build --release -p star2-cli -p star2-updater
+        run: cargo build --release -p star2-cli
 
       - name: Test
-        run: cargo test --release -p star2-proto -p star2-engine
+        run: cargo test --release
 
       # Releases, not upload-artifact: Actions artifact storage is quota-limited
       # on a private repo and uploads fail there long before the build does.
-      - name: Stage binaries
+      - name: Stage binary
         shell: bash
         run: |
           mkdir -p out
-          for b in star2 star2-engine; do
-            for f in "target/release/$b" "target/release/$b.exe"; do
-              [ -f "$f" ] || continue
-              ext=""; case "$f" in *.exe) ext=".exe";; esac
-              cp "$f" "out/${b}-${{ matrix.name }}${ext}"
-            done
-          done
+          cp target/release/star2.exe out/star2-windows-x64.exe
           ls -la out
 
       - name: Publish to dev-builds release

@@ -293,7 +293,6 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             dev_out_ms,
             tx_path_ms,
             rx_path_ms,
-            contract_pps,
             path,
         } => {
             let name = hub.sessions.get(&me).map(|s| s.name.as_str()).unwrap_or("?");
@@ -302,7 +301,7 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
                 "[stats] {name}(s{me}) path={path} tx={tx_pps}/s mic={mic_db:.0}dB \
                  rx={rx_pps}/s play={play_fps}/s loss={loss_pct:.1}% late={late_pps}/s \
                  expand={expand_pps}/s resync={resyncs} jitter={jitter_ms:.1}ms \
-                 buf={buf_ms}ms out={out_ms}ms                  rtt={rtt_ms:.1}ms devin={dev_in_ms:.1}ms ring={in_ring_ms:.2}ms enc={enc_ms:.2}ms                  jb={jb_ms:.1}ms devout={dev_out_ms:.1}ms txpath={tx_path_ms:.1}ms rxpath={rx_path_ms:.1}ms                  contract={contract_pps}/s"
+                 buf={buf_ms}ms out={out_ms}ms                  rtt={rtt_ms:.1}ms devin={dev_in_ms:.1}ms ring={in_ring_ms:.2}ms enc={enc_ms:.2}ms                  jb={jb_ms:.1}ms devout={dev_out_ms:.1}ms txpath={tx_path_ms:.1}ms rxpath={rx_path_ms:.1}ms"
             );
         }
 

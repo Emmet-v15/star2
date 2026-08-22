@@ -69,7 +69,6 @@ pub enum ClientMsg {
         #[serde(default)]
         rx_path_ms: f32,
         #[serde(default)]
-        contract_pps: u32,
 
         path: String,
     },

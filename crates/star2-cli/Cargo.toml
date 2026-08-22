@@ -4,9 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The engine is the supervised child; `star2` itself is the updater/runner.
+# One binary. It runs the call and updates itself in place.
 [[bin]]
-name = "star2-engine"
+name = "star2"
 path = "src/main.rs"
 
 [dependencies]
@@ -14,6 +14,14 @@ star2-engine = { path = "../star2-engine" }
 star2-proto = { workspace = true }
 anyhow = { workspace = true }
 cpal = "0.15"
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 # std has no hostname API. COMPUTERNAME is Windows-only and HOSTNAME is a bash
 # shell variable that is never exported, so the old env-var lookup left every
