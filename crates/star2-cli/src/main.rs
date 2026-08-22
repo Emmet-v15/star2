@@ -63,7 +63,7 @@ fn main() -> Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let me = std::env::current_exe().context("locate the running binary")?;
-    let _ = std::fs::remove_file(me.with_extension("old"));
+    sweep_old(&me);
 
     if block_on(check_for_update(&me)) {
         return relaunch(&me, &raw);
@@ -258,7 +258,7 @@ async fn stage(tmp: &Path, url: &str, sha: &str) -> Result<PathBuf> {
 }
 
 fn swap_self(me: &Path, staged: &Path) -> Result<()> {
-    let old = me.with_extension("old");
+    let old = me.with_extension(format!("{}.old", std::process::id()));
     let _ = std::fs::remove_file(&old);
     std::fs::rename(me, &old).context("move the running binary aside")?;
     if let Err(e) = std::fs::rename(staged, me) {
@@ -266,6 +266,20 @@ fn swap_self(me: &Path, staged: &Path) -> Result<()> {
         return Err(e).context("move the new binary into place");
     }
     Ok(())
+}
+
+fn sweep_old(me: &Path) {
+    let (Some(dir), Some(stem)) = (me.parent(), me.file_stem().and_then(|s| s.to_str())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(stem) && name.ends_with(".old") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn is_stale(path: &Path, want: &str) -> bool {
@@ -350,7 +364,7 @@ fn list_devices() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, resolve_room};
+    use super::{parse, resolve_room, sweep_old, Path};
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -412,6 +426,42 @@ mod tests {
         let once = resolve_room(v(&["--create", "gaming"]));
         assert_eq!(resolve_room(once.clone()), once);
         assert_eq!(resolve_room(resolve_room(once.clone())), once);
+    }
+
+    #[test]
+    fn startup_clears_every_old_binary_left_behind() {
+        let dir = std::env::temp_dir().join(format!("star2-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = dir.join("star2.exe");
+        std::fs::write(&me, b"running").unwrap();
+        std::fs::write(dir.join("star2.old"), b"pre-0.3.5 layout").unwrap();
+        std::fs::write(dir.join("star2.4321.old"), b"a parent that has since exited").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not ours").unwrap();
+
+        sweep_old(&me);
+
+        assert!(!dir.join("star2.old").exists(), "a leftover star2.old survived startup");
+        assert!(!dir.join("star2.4321.old").exists(), "a leftover per-pid .old survived startup");
+        assert!(me.exists(), "startup deleted the binary it is running from");
+        assert!(dir.join("notes.txt").exists(), "startup deleted an unrelated file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_never_reuses_a_name_a_live_parent_could_hold() {
+        let me = Path::new("C:\\star2\\star2.exe");
+        let aside = me.with_extension(format!("{}.old", std::process::id()));
+        assert_ne!(
+            aside,
+            me.with_extension("old"),
+            "two running builds would fight over one .old name and neither could update"
+        );
+        assert!(aside.to_str().unwrap().ends_with(".old"), "sweep_old will not find this file");
+        assert!(
+            aside.file_name().unwrap().to_str().unwrap().starts_with("star2"),
+            "sweep_old will not find this file"
+        );
     }
 
     #[test]
