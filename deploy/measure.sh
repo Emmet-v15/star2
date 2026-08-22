@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Summarise live call telemetry per peer, straight from the signal server.
+# Summarise live call telemetry per peer, straight from the rendezvous server.
 #
 #   ./deploy/measure.sh [SECONDS] [LABEL]
 #
@@ -32,7 +32,7 @@ WINDOW="${1:-60}"
 LABEL="${2:-}"
 HOST="${STAR2_HOST:-empire}"
 
-ssh "$HOST" "journalctl -u star2-signal --since '-${WINDOW}s' --no-pager | grep '\[stats\]'" \
+ssh "$HOST" "journalctl -u star2-rendezvous --since '-${WINDOW}s' --no-pager | grep '\[stats\]'" \
     | python3 -c "
 import sys, re, statistics as st
 

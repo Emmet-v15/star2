@@ -1,11 +1,11 @@
 [package]
-name = "star2-signal"
+name = "star2-rendezvous"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "star2-signal"
+name = "star2-rendezvous"
 path = "src/main.rs"
 
 [dependencies]

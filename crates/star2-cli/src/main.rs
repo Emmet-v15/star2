@@ -30,7 +30,7 @@ USAGE:
                                    (use --room to return to an existing room)
 
 OPTIONS:
-    --url <URL>        signal server           [default: wss://star.v15.studio/star2]
+    --url <URL>        rendezvous server       [default: wss://star.v15.studio/star2]
     --name <NAME>      your display name                       [default: this PC's name]
     --token <TOKEN>    shared secret                           [default: baked in]
     --stereo           send 2 channels instead of 1

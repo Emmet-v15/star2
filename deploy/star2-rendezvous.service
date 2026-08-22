@@ -1,7 +1,7 @@
-# Installed at /etc/systemd/system/star2-signal.service on empire.
+# Installed at /etc/systemd/system/star2-rendezvous.service on empire.
 # Deliberately independent of star v1's star-relay.service (UDP 40000 / TCP 9100).
 [Unit]
-Description=star2 signal server - P2P rendezvous (no media)
+Description=star2 rendezvous server - brokers the punch, carries no media
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Type=simple
 User=opc
 Group=opc
 WorkingDirectory=/home/opc/star2
-ExecStart=/home/opc/star2/star2-signal
+ExecStart=/home/opc/star2/star2-rendezvous
 EnvironmentFile=/home/opc/star2/star2.env
 Restart=on-failure
 RestartSec=2

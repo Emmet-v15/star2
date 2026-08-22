@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let sock = UdpSocket::bind(&udp_bind).await?;
-    eprintln!("[signal] reflex udp on {udp_bind} (advertising {reflex})");
+    eprintln!("[rendezvous] reflex udp on {udp_bind} (advertising {reflex})");
     tokio::spawn(async move {
         let mut buf = [0u8; 2048];
         loop {
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/notify", axum::routing::post(notify_handler))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&ws_bind).await?;
-    eprintln!("[signal] ws on {ws_bind}");
+    eprintln!("[rendezvous] ws on {ws_bind}");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -156,7 +156,7 @@ async fn updater_conn(sock: WebSocket, app: Arc<App>) {
         Ok(Some(Ok(Message::Text(v)))) => v.to_string(),
         _ => "stale(<0.2.0)".to_string(),
     };
-    eprintln!("[signal] updater connected build={build} ({n} total)");
+    eprintln!("[rendezvous] updater connected build={build} ({n} total)");
 
     while let Ok(Some(Ok(_))) = tokio::time::timeout(DEAD_AFTER, inc.next()).await {}
     writer.abort();
@@ -166,7 +166,7 @@ async fn updater_conn(sock: WebSocket, app: Arc<App>) {
         subs.retain(|t| !t.is_closed());
         subs.len()
     };
-    eprintln!("[signal] updater gone build={build} ({left} left)");
+    eprintln!("[rendezvous] updater gone build={build} ({left} left)");
 }
 
 async fn notify_handler(
@@ -178,7 +178,7 @@ async fn notify_handler(
         return (axum::http::StatusCode::UNAUTHORIZED, "bad token\n".to_string());
     }
     let n = notify(&app);
-    eprintln!("[signal] notified {n} updater(s)");
+    eprintln!("[rendezvous] notified {n} updater(s)");
     (axum::http::StatusCode::OK, format!("notified {n}\n"))
 }
 
@@ -219,8 +219,8 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
 
         let Ok(next) = tokio::time::timeout(DEAD_AFTER, inc.next()).await else {
             match id {
-                Some(me) => eprintln!("[signal] session {me} timed out"),
-                None => eprintln!("[signal] connection timed out before hello"),
+                Some(me) => eprintln!("[rendezvous] session {me} timed out"),
+                None => eprintln!("[rendezvous] connection timed out before hello"),
             }
             break;
         };
@@ -246,7 +246,7 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
                     );
                     let _ = tx.send(ServerMsg::Welcome { session: me, reflex: app.reflex.clone() });
                     let build = if build.is_empty() { "stale(<0.2.0)".into() } else { build };
-                    eprintln!("[signal] session {me} hello name={name} build={build}");
+                    eprintln!("[rendezvous] session {me} hello name={name} build={build}");
                     id = Some(me);
                 }
                 _ => {
@@ -264,7 +264,7 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         let mut hub = app.hub.lock().unwrap();
         App::leave_room(&mut hub, me);
         hub.sessions.remove(&me);
-        eprintln!("[signal] session {me} gone");
+        eprintln!("[rendezvous] session {me} gone");
     }
     writer.abort();
 }
@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn signalling_never_crosses_rooms() {
+    fn rendezvous_never_crosses_rooms() {
         let app = app();
         let (a, mut ra) = connect(&app, "a");
         let (b, mut rb) = connect(&app, "b");
@@ -411,14 +411,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unroomed_session_cannot_signal_anyone() {
+    fn an_unroomed_session_cannot_reach_anyone() {
         let app = app();
         let (a, _ra) = connect(&app, "a");
         let (b, mut rb) = connect(&app, "b");
         handle(&app, a, ClientMsg::P2pOffer { to: b, nonce: 1, cands: vec![] });
         assert!(
             drain(&mut rb).is_empty(),
-            "a session that never joined a room could still signal"
+            "a session that never joined a room could still reach another"
         );
     }
 

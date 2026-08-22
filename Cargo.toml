@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/star2-proto", "crates/star2-signal", "crates/star2-engine", "crates/star2-cli"]
+members = ["crates/star2-proto", "crates/star2-rendezvous", "crates/star2-engine", "crates/star2-cli"]
 
 [workspace.package]
 edition = "2021"
@@ -17,7 +17,7 @@ futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 star2-proto = { path = "crates/star2-proto" }
 
-# The signal server runs on a small loaded aarch64 box: optimize for size.
+# The rendezvous server runs on a small loaded aarch64 box: optimize for size.
 [profile.release]
 opt-level = 3
 lto = true

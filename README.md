@@ -2,7 +2,7 @@
 
 Barebones peer-to-peer voice call. 48 kHz Opus, direct UDP, no UI.
 
-`empire` runs a **signalling-only** rendezvous server: it brokers the hole punch and
+`empire` runs a **rendezvous server**: it brokers the hole punch and
 answers reflexive-address probes. Audio never passes through it — once the punch
 confirms, packets go straight between the two peers.
 
@@ -26,8 +26,8 @@ no-op. That is why redundancy is done at the packet layer instead — see below.
 
 | crate | what |
 |---|---|
-| `star2-proto`  | wire types: media header, punch probe, signalling JSON |
-| `star2-signal` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
+| `star2-proto`  | wire types: media header, punch probe, rendezvous JSON |
+| `star2-rendezvous` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
 | `star2-engine` | client core: capture → Opus → UDP → jitter buffer → playback |
 | `star2-cli`    | the `star2` binary: CLI, self-update. The CLI is the whole UI |
 
@@ -44,7 +44,7 @@ star2.exe --room general --name me
 ```
 
 There is **one** binary and it updates itself. On startup — and again whenever the
-signalling server nudges it — it compares its own SHA-256 against the manifest, and if they
+rendezvous server nudges it — it compares its own SHA-256 against the manifest, and if they
 differ it downloads the new build, renames itself to `star2.old`, moves the new one
 into place and relaunches with the same arguments.
 
@@ -59,7 +59,7 @@ one, which is what makes that work without a second supervising process.
 | WebSocket push | instant — `publish-client.sh` POSTs `/star2/notify`, the server fans out a nudge |
 | on reconnect | catches builds shipped while the socket was down |
 
-Push-only; there is no polling loop. Nothing here depends on the signalling server being up: if
+Push-only; there is no polling loop. Nothing here depends on the rendezvous server being up: if
 the manifest or the socket is unreachable, star2 warns and runs the build it has.
 
 The nudge carries no payload beyond "go look again". The manifest and binary are
@@ -75,7 +75,7 @@ controller, so glare can't happen.
 
 | flag | default | meaning |
 |---|---|---|
-| `--url` | `wss://star.v15.studio/star2` | signal server |
+| `--url` | `wss://star.v15.studio/star2` | rendezvous server |
 | `--room` | prompted | both peers must match |
 | `--create <NAME>` | | mint a new room token, print it, join it |
 | `--name` | hostname | display name |
@@ -115,13 +115,13 @@ It is negotiated, not always on: a receiver sets `RED_WANTED` on its own outgoin
 packets while it is seeing loss and for 10 s after, and a sender only doubles up for
 a peer that asked. A clean link pays nothing.
 
-## Deploying the signal server
+## Deploying the rendezvous server
 
 ```sh
-./deploy/deploy-signal.sh empire
+./deploy/deploy-rendezvous.sh empire
 ```
 
-On empire the service is `star2-signal.service`, config in `~/star2/star2.env`.
+On empire the service is `star2-rendezvous.service`, config in `~/star2/star2.env`.
 It is deliberately separate from star v1's `star-relay.service` (UDP 40000 / TCP
 9100), which it does not touch.
 
@@ -138,9 +138,9 @@ firewalld can be wide open and packets will still never reach the box without it
 
 Verified:
 - Two clients, punch confirmed in 60–160 ms, audio both ways, 0% loss.
-- Reflexive discovery through the real NAT (`wss://` signalling + UDP 40001).
-- 45 unit tests: wire round-trips, punch authorisation, jitter estimator, resampler,
-  room tokens, argument resolution, packet redundancy.
+- Reflexive discovery through the real NAT (`wss://` rendezvous + UDP 40001).
+- 58 unit tests: wire round-trips, punch authorisation, jitter estimator, resampler,
+  room tokens, argument resolution, packet redundancy, socket handover.
 
 Not yet verified:
 - A punch between two *different* networks. Both test peers shared a LAN candidate,
@@ -150,10 +150,10 @@ Not yet verified:
 
 - **Windows only.** macOS and Android are out of scope until there is a plan that
   isn't a hand-rolled toolchain per platform.
-- **Media never falls back through the signalling server, by design.** A failed punch ends the call. Symmetric NAT and
+- **Media never falls back through the rendezvous server, by design.** A failed punch ends the call. Symmetric NAT and
   CGNAT (mobile data especially) are the cases that will fail.
 - A failed punch is fatal rather than dropping back to idle to wait for the peer.
 - 1:1 only — a third peer in a room ends the call rather than mixing.
 - No encryption of the media payload. The punch nonce is protected by the
-  signalling TLS, so an off-path attacker cannot redirect media, but an on-path one
+  rendezvous TLS, so an off-path attacker cannot redirect media, but an on-path one
   can read audio.

@@ -6,8 +6,8 @@ idempotent and safe to re-run.
 | file | what it does |
 |---|---|
 | `publish-client.sh` | build `star2.exe`, upload it to `v15.studio/star2.exe`, write the manifest, nudge every connected client |
-| `deploy-signal.sh` | cross-compile the signal server to aarch64 and restart it on empire |
-| `star2-signal.service` | the systemd unit as installed on empire |
+| `deploy-rendezvous.sh` | cross-compile the rendezvous server to aarch64 and restart it on empire |
+| `star2-rendezvous.service` | the systemd unit as installed on empire |
 | `nginx-star2.conf` | the nginx location block added to v1's vhost |
 
 ## Publish a client build
@@ -18,12 +18,12 @@ idempotent and safe to re-run.
 
 Run it from Windows — `audiopus_sys` compiles libopus from source for the host
 arch, so there's no cross-build shortcut for the client, and Windows is the only
-platform we ship. The signal server is the opposite: pure Rust, cross-compiles fine.
+platform we ship. The rendezvous server is the opposite: pure Rust, cross-compiles fine.
 
-## Deploy the signal server
+## Deploy the rendezvous server
 
 ```sh
-./deploy/deploy-signal.sh empire
+./deploy/deploy-rendezvous.sh empire
 ```
 
 ## Ports and why
@@ -49,7 +49,7 @@ Both are already applied for 40001/udp. The OCI ingress rule was added with the
 ## CI
 
 `.github/workflows/build.yml` builds the Windows client plus the aarch64
-signal server. **Artifact upload currently fails**: the account's Actions artifact
+rendezvous server. **Artifact upload currently fails**: the account's Actions artifact
 storage quota is full (star v1's CI uploads an ~80 MB AppImage and an APK on every
 run). Until that's cleared, publish with `publish-client.sh` — which is also why
 that script exists.

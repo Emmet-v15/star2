@@ -39,8 +39,8 @@ jobs:
           gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
           gh release upload dev-builds out/* --clobber
 
-  signal:
-    # The signal server is pure Rust (no C deps), so it cross-compiles to the
+  rendezvous:
+    # The rendezvous server is pure Rust (no C deps), so it cross-compiles to the
     # aarch64 relay box straight from Linux.
     runs-on: ubuntu-latest
     steps:
@@ -50,11 +50,11 @@ jobs:
       - run: rustup target add aarch64-unknown-linux-gnu
       - run: cargo install cargo-zigbuild
       - uses: goto-bus-stop/setup-zig@v2
-      - run: cargo zigbuild -p star2-signal --release --target aarch64-unknown-linux-gnu.2.34
-      - name: Publish signal to dev-builds release
+      - run: cargo zigbuild -p star2-rendezvous --release --target aarch64-unknown-linux-gnu.2.34
+      - name: Publish rendezvous to dev-builds release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp target/aarch64-unknown-linux-gnu/release/star2-signal star2-signal-aarch64
+          cp target/aarch64-unknown-linux-gnu/release/star2-rendezvous star2-rendezvous-aarch64
           gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
-          gh release upload dev-builds star2-signal-aarch64 --clobber
+          gh release upload dev-builds star2-rendezvous-aarch64 --clobber

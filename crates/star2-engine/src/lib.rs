@@ -47,8 +47,8 @@ const JB_DECAY_EVERY: u32 = 256;
 const JB_PCTILE: f64 = 0.97;
 const SPIKE_MULT: f64 = 3.0;
 const SPIKE_MAX_MS: f64 = 400.0;
-const SIGNAL_RETRY: Duration = Duration::from_secs(3);
-const SIGNAL_QUIET: Duration = Duration::from_secs(30);
+const RENDEZVOUS_RETRY: Duration = Duration::from_secs(3);
+const RENDEZVOUS_QUIET: Duration = Duration::from_secs(30);
 const DIRECT_GRACE: Duration = Duration::from_secs(3);
 const SPIKE_DECAY: f64 = 0.985;
 
@@ -61,7 +61,7 @@ const P2P_MAX_TXIDS: usize = 256;
 const PKT_BUF: usize = 4096;
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
-static SIGNAL_DOWN: AtomicBool = AtomicBool::new(false);
+static RENDEZVOUS_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn set_verbose(on: bool) {
     VERBOSE.store(on, Ordering::Relaxed);
@@ -412,14 +412,14 @@ where
                     return;
                 }
 
-                if !SIGNAL_DOWN.swap(true, Ordering::Relaxed) {
+                if !RENDEZVOUS_DOWN.swap(true, Ordering::Relaxed) {
                     if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
-                        on_event(Event::Status("signal down, call unaffected".into()));
+                        on_event(Event::Status("rendezvous down, call unaffected".into()));
                     } else {
-                        on_event(Event::Status(format!("signal down: {e}")));
+                        on_event(Event::Status(format!("rendezvous down: {e}")));
                     }
                 }
-                std::thread::sleep(SIGNAL_RETRY);
+                std::thread::sleep(RENDEZVOUS_RETRY);
             }
         })?
     });
@@ -476,8 +476,8 @@ async fn control_loop(
 ) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (ws, _) = tokio_tungstenite::connect_async(&cfg.url).await.context("connect")?;
-    if SIGNAL_DOWN.swap(false, Ordering::Relaxed) {
-        on_event(Event::Status("signal up".into()));
+    if RENDEZVOUS_DOWN.swap(false, Ordering::Relaxed) {
+        on_event(Event::Status("rendezvous up".into()));
     }
     let (mut tx_ws, mut rx_ws) = ws.split();
     let (tx, mut rx) = unbounded_channel::<ClientMsg>();
@@ -502,9 +502,9 @@ async fn control_loop(
                     serde_json::to_string(&m)?.into(),
                 )).await?;
             }
-            msg = tokio::time::timeout(SIGNAL_QUIET, rx_ws.next()) => {
-                let Ok(msg) = msg else { bail!("signal server went quiet") };
-                let Some(msg) = msg else { bail!("signal server closed") };
+            msg = tokio::time::timeout(RENDEZVOUS_QUIET, rx_ws.next()) => {
+                let Ok(msg) = msg else { bail!("rendezvous went quiet") };
+                let Some(msg) = msg else { bail!("rendezvous closed") };
                 let tokio_tungstenite::tungstenite::Message::Text(txt) = msg? else { continue };
                 let Ok(sm) = serde_json::from_str::<ServerMsg>(&txt) else { continue };
                 match sm {
@@ -553,7 +553,7 @@ async fn control_loop(
                         };
 
                         if peer == Some(session) && phase == P2pPhase::Direct {
-                            on_event(Event::Status("peer left signalling, direct path up".into()));
+                            on_event(Event::Status("peer left rendezvous, direct path up".into()));
                         } else if peer == Some(session) {
 
                             go_idle(&shared, "peer left");
@@ -646,7 +646,7 @@ async fn discover_reflex(shared: &Arc<Shared>, sock: &UdpSocket, reflex: &str, s
         let _ = sock.send_to(&probe, dst);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    log_line("signal no reflexive address (UDP unreachable?)".into());
+    log_line("rendezvous no reflexive address (UDP unreachable?)".into());
 }
 
 fn on_membership(

@@ -41,11 +41,11 @@ merged version is slightly worse at the edges.
 
 - P2P voice, 1:1, low latency. That is the product.
 - **Seamless self-update is a headline feature, not plumbing.** See §8.
-- **Signalling only** — the signalling server brokers the hole punch and answers
+- **Rendezvous only** — the rendezvous server brokers the hole punch and answers
   reflexive probes. Media never passes through it and **never falls back through
   it.** A failed punch ends the call.
-- **Must not depend on the signalling server being up.** A call already in
-  progress survives the signalling server going away.
+- **Must not depend on the rendezvous server being up.** A call already in
+  progress survives the rendezvous server going away.
 - No UI beyond the terminal.
 - Windows is the target. macOS and Android are out of scope until there is a
   plan that does not cost more than the feature is worth.
@@ -77,8 +77,8 @@ merged version is slightly worse at the edges.
 
 ## 8. Updates are seamless, including mid-call
 
-The signalling server says a new build exists; the client is running it moments later. No
-prompt, no restart the user has to perform, and **no dropped call** — a peer
+The rendezvous server says a new build exists; the client is running it moments
+later. No prompt, no restart the user has to perform, and **no dropped call** — a peer
 mid-conversation upgrades without either side hearing it happen. This is a goal
 of the project in its own right, not a detail of the build pipeline. Cost that
 buys seamlessness is worth paying; §1 does not apply to it.
