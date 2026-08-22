@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
 const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
+const QUIET: Duration = Duration::from_secs(30);
 
 static RESTART: AtomicBool = AtomicBool::new(false);
 
@@ -194,7 +195,7 @@ async fn watch_session(me: &Path) -> Result<()> {
         RESTART.store(true, Ordering::Relaxed);
         return Ok(());
     }
-    while let Some(msg) = rx.next().await {
+    while let Ok(Some(msg)) = tokio::time::timeout(QUIET, rx.next()).await {
         msg?;
         if check_for_update(me).await {
             RESTART.store(true, Ordering::Relaxed);

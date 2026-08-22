@@ -47,6 +47,7 @@ const JB_PCTILE: f64 = 0.97;
 const SPIKE_MULT: f64 = 3.0;
 const SPIKE_MAX_MS: f64 = 400.0;
 const SIGNAL_RETRY: Duration = Duration::from_secs(3);
+const SIGNAL_QUIET: Duration = Duration::from_secs(30);
 const DIRECT_GRACE: Duration = Duration::from_secs(3);
 const SPIKE_DECAY: f64 = 0.985;
 
@@ -504,7 +505,8 @@ async fn control_loop(
                     serde_json::to_string(&m)?.into(),
                 )).await?;
             }
-            msg = rx_ws.next() => {
+            msg = tokio::time::timeout(SIGNAL_QUIET, rx_ws.next()) => {
+                let Ok(msg) = msg else { bail!("signal server went quiet") };
                 let Some(msg) = msg else { bail!("signal server closed") };
                 let tokio_tungstenite::tungstenite::Message::Text(txt) = msg? else { continue };
                 let Ok(sm) = serde_json::from_str::<ServerMsg>(&txt) else { continue };
