@@ -21,8 +21,6 @@ pub(crate) enum P2pPhase {
     Idle,
     Punching,
     Direct,
-
-    Failed,
 }
 
 pub(crate) struct P2pState {
@@ -123,7 +121,7 @@ pub(crate) fn handle_punch(
     if s.peer_session != Some(hdr_session) || pr.nonce != s.local_nonce {
         return None;
     }
-    if s.phase == P2pPhase::Idle || s.phase == P2pPhase::Failed {
+    if s.phase == P2pPhase::Idle {
         return None;
     }
     s.last_peer_rx = Instant::now();
@@ -152,13 +150,6 @@ pub(crate) fn handle_punch(
         }
         _ => None,
     }
-}
-
-pub(crate) fn p2p_fail(s: &mut P2pState, route: &MediaRoute, why: &str) {
-    s.phase = P2pPhase::Failed;
-    *route.dst.lock().unwrap() = None;
-    route.allowed.lock().unwrap().clear();
-    log_line(format!("[engine] direct path failed: {why}"));
 }
 
 pub(crate) fn p2p_teardown(p2p: &Mutex<P2pState>, route: &MediaRoute, why: &str) {
@@ -239,6 +230,60 @@ mod tests {
         let src: SocketAddr = "203.0.113.9:6000".parse().unwrap();
         handle_punch(1, &p2p, &r, &sock, src, 7, &punch_payload(PUNCH_ACK, 42, 0xDEAD));
         assert_eq!(p2p.lock().unwrap().phase, P2pPhase::Punching);
+    }
+
+    fn punching(p2p: &Mutex<P2pState>, peer: SessionId, local: u64, remote: u64) -> u64 {
+        let mut s = p2p.lock().unwrap();
+        s.peer_session = Some(peer);
+        s.local_nonce = local;
+        s.remote_nonce = Some(remote);
+        s.phase = P2pPhase::Punching;
+        s.new_txid()
+    }
+
+    #[test]
+    fn a_dead_call_returns_to_idle_and_can_dial_again() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let r = route();
+        let p2p = Mutex::new(P2pState::new());
+
+        let txid = punching(&p2p, 7, 42, 99);
+        let first: SocketAddr = "203.0.113.5:5000".parse().unwrap();
+        handle_punch(1, &p2p, &r, &sock, first, 7, &punch_payload(PUNCH_ACK, 42, txid));
+        assert_eq!(p2p.lock().unwrap().phase, P2pPhase::Direct);
+
+        p2p_teardown(&p2p, &r, "peer stopped responding");
+        {
+            let s = p2p.lock().unwrap();
+            assert_eq!(s.phase, P2pPhase::Idle, "a dead call left the state machine wedged");
+            assert_eq!(s.peer_session, None, "the dead peer is still latched, so a rejoin is ignored");
+        }
+        assert_eq!(*r.dst.lock().unwrap(), None);
+        assert!(r.allowed.lock().unwrap().is_empty(), "the dead peer can still send us media");
+
+        let txid = punching(&p2p, 9, 77, 11);
+        let second: SocketAddr = "203.0.113.8:7000".parse().unwrap();
+        handle_punch(1, &p2p, &r, &sock, second, 9, &punch_payload(PUNCH_ACK, 77, txid));
+        assert_eq!(
+            p2p.lock().unwrap().phase,
+            P2pPhase::Direct,
+            "a second call could not start without restarting the process"
+        );
+        assert_eq!(*r.dst.lock().unwrap(), Some(second));
+    }
+
+    #[test]
+    fn teardown_keeps_the_candidates_we_already_discovered() {
+        let r = route();
+        let p2p = Mutex::new(P2pState::new());
+        p2p.lock().unwrap().my_cands = vec!["203.0.113.5:5000".into()];
+
+        p2p_teardown(&p2p, &r, "peer left");
+        assert_eq!(
+            p2p.lock().unwrap().my_cands,
+            vec!["203.0.113.5:5000".to_string()],
+            "we forgot our own address and have to rediscover it before the next call"
+        );
     }
 
     #[test]

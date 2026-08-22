@@ -109,7 +109,7 @@ fn main() -> Result<()> {
                 }
             }
             Ok(Event::Ended(why)) => {
-                println!("[star2] call ended: {why}");
+                println!("[star2] fatal: {why}");
                 return Ok(());
             }
             Err(RecvTimeoutError::Timeout) => {}

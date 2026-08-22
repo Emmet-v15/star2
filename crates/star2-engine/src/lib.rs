@@ -189,6 +189,22 @@ fn go_idle(shared: &Arc<Shared>, why: &str) {
     shared.inbox.lock().unwrap().clear();
 }
 
+fn abandon(
+    shared: &Arc<Shared>,
+    on_event: &Arc<dyn Fn(Event) + Send + Sync>,
+    peer: Option<SessionId>,
+    why: &str,
+) {
+    if let Some(p) = peer {
+        shared.send_ctrl(ClientMsg::P2pAbort { to: p });
+    }
+    go_idle(shared, why);
+    on_event(Event::Status(format!("{why} - waiting for a peer")));
+
+    let members = shared.members.lock().unwrap().clone();
+    on_membership(shared, &members, on_event);
+}
+
 fn to_dbfs(peak: f32) -> f32 {
     if peak <= 1e-5 {
         -99.0
@@ -765,15 +781,13 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
             P2pPhase::Punching => {
                 if s.started.elapsed() > P2P_PUNCH_TIMEOUT {
                     let peer = s.peer_session;
-                    p2p_fail(&mut s, &shared.route, "punch timed out");
                     drop(s);
-                    if let Some(p) = peer {
-                        shared.send_ctrl(ClientMsg::P2pAbort { to: p });
-                    }
-
-                    on_event(Event::Ended(
-                        "hole punch failed - no direct path (symmetric NAT/CGNAT?)".into(),
-                    ));
+                    abandon(
+                        shared,
+                        on_event,
+                        peer,
+                        "hole punch failed - no direct path (symmetric NAT/CGNAT?)",
+                    );
                     continue;
                 }
 
@@ -787,13 +801,8 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
             P2pPhase::Direct => {
                 if s.last_peer_rx.elapsed() > P2P_DIRECT_DEAD {
                     let peer = s.peer_session;
-                    p2p_fail(&mut s, &shared.route, "direct path went silent");
                     drop(s);
-                    if let Some(p) = peer {
-                        shared.send_ctrl(ClientMsg::P2pAbort { to: p });
-                    }
-
-                    on_event(Event::Ended("peer stopped responding".into()));
+                    abandon(shared, on_event, peer, "peer stopped responding");
                     continue;
                 }
 
@@ -803,7 +812,7 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                 }
             }
 
-            P2pPhase::Idle | P2pPhase::Failed => {}
+            P2pPhase::Idle => {}
         }
     }
 }
@@ -1068,7 +1077,6 @@ fn playout_loop(
                 let path = match shared.p2p.lock().unwrap().phase {
                     P2pPhase::Direct => "direct",
                     P2pPhase::Punching => "punching",
-                    P2pPhase::Failed => "failed",
                     P2pPhase::Idle => "idle",
                 };
                 let late = dec.late_dropped - win_late;
@@ -1114,7 +1122,6 @@ fn playout_loop(
                 let path = match shared.p2p.lock().unwrap().phase {
                     P2pPhase::Direct => "direct",
                     P2pPhase::Punching => "punching",
-                    P2pPhase::Failed => "failed",
                     P2pPhase::Idle => "idle",
                 };
                 shared.send_ctrl(ClientMsg::Stats {
