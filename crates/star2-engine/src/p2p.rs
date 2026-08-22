@@ -114,7 +114,7 @@ pub(crate) fn handle_punch(
     src: SocketAddr,
     hdr_session: SessionId,
     payload: &[u8],
-) -> Option<SocketAddr> {
+) -> Option<(SocketAddr, u64)> {
     let pr = PunchProbe::decode(payload)?;
     let mut s = p2p.lock().unwrap();
 
@@ -143,8 +143,7 @@ pub(crate) fn handle_punch(
                 route.allowed.lock().unwrap().insert(src);
                 *route.dst.lock().unwrap() = Some(src);
                 s.phase = P2pPhase::Direct;
-                log_line(format!("[engine] connected - direct path to {src} ({}ms)", s.started.elapsed().as_millis()));
-                return Some(src);
+                return Some((src, s.started.elapsed().as_millis() as u64));
             }
             None
         }

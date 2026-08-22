@@ -124,7 +124,7 @@ impl Default for CallConfig {
 pub enum Event {
     Status(String),
 
-    Direct(SocketAddr),
+    Direct { peer: SocketAddr, ms: u64 },
 
     Ended(String),
 
@@ -200,7 +200,7 @@ fn abandon(
         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
     }
     go_idle(shared, why);
-    on_event(Event::Status(format!("{why} - waiting for a peer")));
+    on_event(Event::Status(format!("idle {why}")));
 
     let members = shared.members.lock().unwrap().clone();
     on_membership(shared, &members, on_event);
@@ -294,7 +294,7 @@ where
     let (mut in_prod, mut in_cons) = HeapRb::<f32>::new(SR as usize * 2).split();
     let (mut master_prod, mut master_cons) = HeapRb::<f32>::new(SR as usize * 2).split();
 
-    let err_fn = |e| log_line(format!("[engine] audio stream error: {e}"));
+    let err_fn = |e| log_line(format!("audio {e}"));
     if in_rate != SR {
         debug_line(format!("[engine] resampling mic {in_rate}Hz -> {SR}Hz"));
     }
@@ -413,13 +413,9 @@ where
 
                 if !SIGNAL_DOWN.swap(true, Ordering::Relaxed) {
                     if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
-                        on_event(Event::Status(
-                            "signal server unreachable - call unaffected, retrying".into(),
-                        ));
+                        on_event(Event::Status("signal down, call unaffected".into()));
                     } else {
-                        on_event(Event::Status(format!(
-                            "signal server unreachable ({e}) - retrying"
-                        )));
+                        on_event(Event::Status(format!("signal down: {e}")));
                     }
                 }
                 std::thread::sleep(SIGNAL_RETRY);
@@ -480,7 +476,7 @@ async fn control_loop(
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (ws, _) = tokio_tungstenite::connect_async(&cfg.url).await.context("connect")?;
     if SIGNAL_DOWN.swap(false, Ordering::Relaxed) {
-        on_event(Event::Status("signal server back".into()));
+        on_event(Event::Status("signal up".into()));
     }
     let (mut tx_ws, mut rx_ws) = ws.split();
     let (tx, mut rx) = unbounded_channel::<ClientMsg>();
@@ -531,17 +527,15 @@ async fn control_loop(
                         tx.send(ClientMsg::Join { room: cfg.room_token.clone() })?;
                         joined = true;
                     }
-                    ServerMsg::Room { room, members } => {
-                        on_event(Event::Status(if members.len() < 2 {
-                            format!("waiting for your peer to join {room}")
-                        } else {
-                            format!("peer already in {room} - connecting")
-                        }));
+                    ServerMsg::Room { members, .. } => {
+                        on_event(Event::Status(
+                            if members.len() < 2 { "wait" } else { "punch" }.into(),
+                        ));
                         let ids: HashSet<SessionId> = members.iter().map(|m| m.session).collect();
                         on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::Joined { session, name } => {
-                        on_event(Event::Status(format!("{name} joined")));
+                        on_event(Event::Status(format!("peer {name}")));
 
                         let ids = {
                             let mut m = shared.members.lock().unwrap();
@@ -558,13 +552,11 @@ async fn control_loop(
                         };
 
                         if peer == Some(session) && phase == P2pPhase::Direct {
-                            on_event(Event::Status(
-                                "relay says peer left, but the direct path is up - ignoring".into(),
-                            ));
+                            on_event(Event::Status("peer left relay, direct path up".into()));
                         } else if peer == Some(session) {
 
                             go_idle(&shared, "peer left");
-                            on_event(Event::Status("peer left - waiting for them to rejoin".into()));
+                            on_event(Event::Status("idle peer left".into()));
                         }
 
                         let ids = {
@@ -626,9 +618,7 @@ async fn control_loop(
                         if shared.p2p.lock().unwrap().peer_session == Some(from) {
 
                             go_idle(&shared, "peer aborted");
-                            on_event(Event::Status(
-                                "peer gave up on the direct path - waiting".into(),
-                            ));
+                            on_event(Event::Status("idle peer aborted".into()));
                         }
                     }
                     ServerMsg::Error { msg } => bail!("server: {msg}"),
@@ -655,7 +645,7 @@ async fn discover_reflex(shared: &Arc<Shared>, sock: &UdpSocket, reflex: &str, s
         let _ = sock.send_to(&probe, dst);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    log_line("[engine] no reflexive address (signal server UDP unreachable?)".into());
+    log_line("signal no reflexive address (UDP unreachable?)".into());
 }
 
 fn on_membership(
@@ -695,10 +685,7 @@ fn on_membership(
     } else if members.len() > 2 {
 
         go_idle(shared, "room has more than 2 members");
-        on_event(Event::Status(format!(
-            "room has {} members - 1:1 only, waiting for it to clear",
-            members.len()
-        )));
+        on_event(Event::Status(format!("idle room has {} members, 1:1 only", members.len())));
     }
 }
 
@@ -729,10 +716,10 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
 
         if h.is_punch() {
 
-            if let Some(peer) =
+            if let Some((peer, ms)) =
                 handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, h.session, payload)
             {
-                on_event(Event::Direct(peer));
+                on_event(Event::Direct { peer, ms });
             }
             continue;
         }
@@ -788,7 +775,7 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                         shared,
                         on_event,
                         peer,
-                        "hole punch failed - no direct path (symmetric NAT/CGNAT?)",
+                        "punch failed, no direct path (symmetric NAT/CGNAT?)",
                     );
                     continue;
                 }
@@ -804,7 +791,7 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                 if s.last_peer_rx.elapsed() > P2P_DIRECT_DEAD {
                     let peer = s.peer_session;
                     drop(s);
-                    abandon(shared, on_event, peer, "peer stopped responding");
+                    abandon(shared, on_event, peer, "peer silent");
                     continue;
                 }
 

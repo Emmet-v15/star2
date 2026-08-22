@@ -26,7 +26,8 @@ star2 - P2P voice call (48 kHz Opus, direct UDP), keeps itself up to date
 USAGE:
     star2                          asks for a room token; blank makes a new room
     star2 --room <TOKEN>           join a room someone shared the token for
-    star2 --create <NAME>          make a room token, print it, join it
+    star2 --create <NAME>          mint a NEW token each run, print it, join it
+                                   (use --room to return to an existing room)
 
 OPTIONS:
     --url <URL>        signal server           [default: wss://star.v15.studio/star2]
@@ -78,13 +79,13 @@ fn main() -> Result<()> {
 
     let (cfg, stats) = parse(&args)?;
     println!(
-        "[star2] {} joining {} as {:?} ({}, {} kbps)",
+        "star2 {}  {}  {}  {} kbps",
         env!("CARGO_PKG_VERSION"),
-        cfg.room_token,
         cfg.name,
         if cfg.stereo { "stereo" } else { "mono" },
         cfg.bitrate / 1000
     );
+    println!("room {}", cfg.room_token);
 
     let (tx, rx) = channel();
     let call = start_call(cfg, move |e| {
@@ -95,20 +96,20 @@ fn main() -> Result<()> {
 
     loop {
         if RESTART.load(Ordering::Relaxed) {
-            println!("[star2] restarting into the new build");
+            println!("update restarting");
             call.stop();
             return relaunch(&me, &args);
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Event::Status(s)) => println!("[star2] {s}"),
-            Ok(Event::Direct(_)) => {}
+            Ok(Event::Status(s)) => println!("{s}"),
+            Ok(Event::Direct { peer, ms }) => println!("direct {peer} {ms}ms"),
             Ok(Event::Stats { jitter_ms, target_ms, loss_pct, out_ms, rx_pps, play_fps }) => {
                 if stats {
                     println!("  jitter {jitter_ms:.1}ms  buf {target_ms:.0}ms  loss {loss_pct:.1}%  out {out_ms:.0}ms  rx {rx_pps}/s  play {play_fps}/s");
                 }
             }
             Ok(Event::Ended(why)) => {
-                println!("[star2] fatal: {why}");
+                println!("fatal {why}");
                 return Ok(());
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -173,7 +174,7 @@ fn watch_for_updates(me: PathBuf) {
         block_on(async {
             loop {
                 if let Err(e) = watch_session(&me).await {
-                    eprintln!("[star2] update channel: {e}");
+                    eprintln!("update channel: {e}");
                 }
                 if RESTART.load(Ordering::Relaxed) {
                     return;
@@ -209,7 +210,7 @@ async fn check_for_update(me: &Path) -> bool {
     let manifest = match fetch_manifest().await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[star2] manifest unavailable ({e}) - keeping this build");
+            eprintln!("update unavailable: {e}");
             return false;
         }
     };
@@ -217,20 +218,20 @@ async fn check_for_update(me: &Path) -> bool {
         return false;
     }
 
-    println!("[star2] downloading {}", manifest.version);
+    println!("update {} downloading", manifest.version);
     let staged = match stage(&me.with_extension("new"), &manifest.url, &manifest.sha256).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[star2] download failed, keeping this build: {e}");
+            eprintln!("update download failed: {e}");
             return false;
         }
     };
     if let Err(e) = swap_self(me, &staged) {
-        eprintln!("[star2] install failed, keeping this build: {e}");
+        eprintln!("update install failed: {e}");
         let _ = std::fs::remove_file(&staged);
         return false;
     }
-    println!("[star2] installed {}", manifest.version);
+    println!("update {} installed", manifest.version);
     true
 }
 
@@ -279,7 +280,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn ask_for_room() -> Option<String> {
-    print!("room token (blank to create a new room): ");
+    print!("room token (enter = new room): ");
     let _ = std::io::stdout().flush();
 
     let mut line = String::new();
@@ -293,11 +294,7 @@ fn ask_for_room() -> Option<String> {
     }
 
     let token = star2_proto::new_room_token(typed);
-    println!();
-    println!("  your room token - share it, they paste it at the same prompt:");
-    println!();
-    println!("      {token}");
-    println!();
+    println!("{token}  (share it)");
     Some(token)
 }
 
@@ -311,14 +308,7 @@ fn resolve_room(args: Vec<String>) -> Vec<String> {
         match a.as_str() {
             "--create" => {
                 let token = star2_proto::new_room_token(&it.next().unwrap_or_default());
-                println!();
-                println!("  room {:?} created - the token is:", star2_proto::room_label(&token));
-                println!();
-                println!("      {token}");
-                println!();
-                println!("  share it - they join with:  star2 --room {token}");
-                println!("  --create mints a NEW token every run, so use --room to return to it");
-                println!();
+                println!("{token}  (share it)");
                 created = Some(token);
             }
             "--room" => existing = it.next(),
