@@ -135,6 +135,8 @@ pub enum Event {
 pub struct CallHandle {
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
+    shared: Arc<Shared>,
+    sock: UdpSocket,
 
     _streams: (cpal::Stream, cpal::Stream),
 }
@@ -149,6 +151,41 @@ impl CallHandle {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+
+    pub fn live_call(&self) -> Option<(&UdpSocket, handover::CallState)> {
+        let s = self.shared.p2p.lock().unwrap();
+        if s.phase != P2pPhase::Direct {
+            return None;
+        }
+        Some((
+            &self.sock,
+            handover::CallState {
+                socket: String::new(),
+                peer_addr: (*self.shared.route.dst.lock().unwrap())?,
+                media_session: self.shared.my_session(),
+                peer_session: s.peer_session?,
+                local_nonce: s.local_nonce,
+                remote_nonce: s.remote_nonce?,
+            },
+        ))
+    }
+
+    pub fn stop_receiving(&self) {
+        self.shared.rx_stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn media_cursor(&self) -> handover::Cutover {
+        handover::Cutover {
+            seq: self.shared.seq.load(Ordering::Relaxed) as u16,
+            ts: self.shared.ts.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn resume_from(&self, at: handover::Cutover) {
+        self.shared.seq.store(at.seq as u32, Ordering::Relaxed);
+        self.shared.ts.store(at.ts, Ordering::Relaxed);
+        self.shared.paused.store(false, Ordering::Relaxed);
     }
 }
 
@@ -184,6 +221,12 @@ struct Shared {
     peer_wants_red: AtomicBool,
     want_red: AtomicBool,
     stop: Arc<AtomicBool>,
+
+    inherited_call: bool,
+    paused: AtomicBool,
+    rx_stop: AtomicBool,
+    seq: AtomicU32,
+    ts: AtomicU32,
 }
 
 fn go_idle(shared: &Arc<Shared>, why: &str) {
@@ -226,7 +269,11 @@ impl Shared {
     }
 }
 
-pub fn start_call<F>(cfg: CallConfig, on_event: F) -> Result<CallHandle>
+pub fn start_call<F>(
+    cfg: CallConfig,
+    inherited: Option<handover::Inherited>,
+    on_event: F,
+) -> Result<CallHandle>
 where
     F: Fn(Event) + Send + Sync + 'static,
 {
@@ -235,12 +282,16 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let send_ch = if cfg.stereo { 2 } else { 1 };
 
-    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    let taken = inherited.as_ref().map(|i| i.call.clone());
+    let sock = match inherited {
+        Some(i) => i.sock,
+        None => UdpSocket::bind("0.0.0.0:0")?,
+    };
     sock.set_read_timeout(Some(Duration::from_millis(100)))?;
     let local_port = sock.local_addr()?.port();
 
     let shared = Arc::new(Shared {
-        session: Mutex::new(None),
+        session: Mutex::new(taken.as_ref().map(|c| c.media_session)),
         reflex: Mutex::new(None),
         inbox: Mutex::new(HashMap::new()),
         p2p: Mutex::new(P2pState::new()),
@@ -258,7 +309,25 @@ where
         peer_wants_red: AtomicBool::new(false),
         want_red: AtomicBool::new(true),
         stop: stop.clone(),
+        inherited_call: taken.is_some(),
+        paused: AtomicBool::new(taken.is_some()),
+        rx_stop: AtomicBool::new(false),
+        seq: AtomicU32::new(0),
+        ts: AtomicU32::new(0),
     });
+
+    if let Some(c) = &taken {
+        let mut s = shared.p2p.lock().unwrap();
+        s.phase = P2pPhase::Direct;
+        s.peer_session = Some(c.peer_session);
+        s.local_nonce = c.local_nonce;
+        s.remote_nonce = Some(c.remote_nonce);
+        s.last_peer_rx = Instant::now();
+        s.merge_cand(c.peer_addr);
+        drop(s);
+        *shared.route.dst.lock().unwrap() = Some(c.peer_addr);
+        shared.route.allowed.lock().unwrap().insert(c.peer_addr);
+    }
 
     let host = cpal::default_host();
     let input = pick_device(&host, &cfg.input, true)?;
@@ -464,7 +533,7 @@ where
         })?
     });
 
-    Ok(CallHandle { stop, threads, _streams: (in_stream, out_stream) })
+    Ok(CallHandle { stop, threads, shared, sock, _streams: (in_stream, out_stream) })
 }
 
 async fn control_loop(
@@ -509,6 +578,13 @@ async fn control_loop(
                 let Ok(sm) = serde_json::from_str::<ServerMsg>(&txt) else { continue };
                 match sm {
                     ServerMsg::Welcome { session, reflex } => {
+                        if shared.inherited_call {
+                            debug_line(format!(
+                                "[engine] rendezvous session {session}, call carries on as {}",
+                                shared.my_session()
+                            ));
+                            continue;
+                        }
                         *shared.session.lock().unwrap() = Some(session);
                         debug_line(format!("[engine] session {session}, reflex via {reflex}"));
 
@@ -693,7 +769,11 @@ fn on_membership(
 fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event) + Send + Sync>) {
     let mut buf = vec![0u8; PKT_BUF];
     let base = Instant::now();
-    while !shared.stop.load(Ordering::Relaxed) {
+    while !shared.stop.load(Ordering::Relaxed) && !shared.rx_stop.load(Ordering::Relaxed) {
+        if shared.paused.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
         let (n, src) = match sock.recv_from(&mut buf) {
             Ok(v) => v,
             Err(_) => continue,
@@ -833,6 +913,14 @@ fn encode_loop(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        if shared.paused.load(Ordering::Relaxed) {
+            for _ in 0..need {
+                let _ = in_cons.try_pop();
+            }
+            seq = shared.seq.load(Ordering::Relaxed) as u16;
+            ts = shared.ts.load(Ordering::Relaxed);
+            continue;
+        }
         let ring_us = (in_cons.occupied_len() as u64 * 1_000_000)
             / (SR as u64 * send_ch as u64);
         shared.ring_sum_us.fetch_add(ring_us, Ordering::Relaxed);
@@ -850,6 +938,7 @@ fn encode_loop(
         let Some(dst) = *shared.route.dst.lock().unwrap() else {
             seq = seq.wrapping_add(1);
             ts = ts.wrapping_add(FRAME as u32);
+            publish_cursor(shared, seq, ts);
             continue;
         };
         for (i, &s) in pcm_f.iter().enumerate() {
@@ -892,8 +981,14 @@ fn encode_loop(
         }
         seq = seq.wrapping_add(1);
         ts = ts.wrapping_add(FRAME as u32);
+        publish_cursor(shared, seq, ts);
     }
     Ok(())
+}
+
+fn publish_cursor(shared: &Arc<Shared>, seq: u16, ts: u32) {
+    shared.seq.store(seq as u32, Ordering::Relaxed);
+    shared.ts.store(ts, Ordering::Relaxed);
 }
 
 fn playout_loop(

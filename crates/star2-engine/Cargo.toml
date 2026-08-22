@@ -18,6 +18,7 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 

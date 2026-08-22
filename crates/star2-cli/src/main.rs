@@ -10,7 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use star2_engine::{start_call, CallConfig, Event};
+use star2_engine::{handover, start_call, CallConfig, CallHandle, Event};
 use tokio_tungstenite::tungstenite::Message;
 
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
@@ -63,21 +63,33 @@ fn main() -> Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     let me = std::env::current_exe().context("locate the running binary")?;
-    let _ = std::fs::remove_file(me.with_extension("old"));
 
-    let updated = block_on(check_for_update(&me));
+    let taking_over = raw.iter().any(|a| a == handover::FLAG);
+    let raw: Vec<String> = raw.into_iter().filter(|a| a != handover::FLAG).collect();
 
-    let mut args = resolve_room(raw);
-    if !args.iter().any(|a| a == "--room") {
-        if let Some(token) = ask_for_room() {
-            args.push("--room".into());
-            args.push(token);
+    let mut predecessor = taking_over
+        .then(handover::answer_predecessor)
+        .transpose()
+        .context("answer the old build")?;
+
+    let (args, inherited) = if let Some(p) = predecessor.as_mut() {
+        (raw, Some(p.inherit_call().context("take the call from the old build")?))
+    } else {
+        let _ = std::fs::remove_file(me.with_extension("old"));
+        let updated = block_on(check_for_update(&me));
+
+        let mut args = resolve_room(raw);
+        if !args.iter().any(|a| a == "--room") {
+            if let Some(token) = ask_for_room() {
+                args.push("--room".into());
+                args.push(token);
+            }
         }
-    }
-
-    if updated {
-        return relaunch(&me, &args);
-    }
+        if updated {
+            return relaunch(&me, &args);
+        }
+        (args, None)
+    };
 
     let (cfg, stats) = parse(&args)?;
     println!(
@@ -90,17 +102,30 @@ fn main() -> Result<()> {
     println!("room {}", cfg.room_token);
 
     let (tx, rx) = channel();
-    let call = start_call(cfg, move |e| {
+    let call = start_call(cfg, inherited, move |e| {
         let _ = tx.send(e);
     })?;
+
+    if let Some(p) = predecessor.as_mut() {
+        p.announce_ready()?;
+        let at = p.wait_for_cutover()?;
+        call.resume_from(at);
+        println!("took the call over mid-stream at seq {}", at.seq);
+    }
 
     watch_for_updates(me.clone());
 
     loop {
-        if RESTART.load(Ordering::Relaxed) {
-            println!("update restarting");
-            call.stop();
-            return relaunch(&me, &args);
+        if RESTART.swap(false, Ordering::Relaxed) {
+            match hand_over(&me, &args, &call) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    println!("update restarting");
+                    call.stop();
+                    return relaunch(&me, &args);
+                }
+                Err(e) => println!("update deferred, call unaffected: {e:#}"),
+            }
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Event::Status(s)) => println!("{s}"),
@@ -153,6 +178,25 @@ fn parse(args: &[String]) -> Result<(CallConfig, bool)> {
         }
     }
     Ok((cfg, stats))
+}
+
+fn hand_over(me: &Path, args: &[String], call: &CallHandle) -> Result<bool> {
+    let Some((sock, state)) = call.live_call() else { return Ok(false) };
+
+    let mut cmd = Command::new(me);
+    cmd.args(args).arg(handover::FLAG);
+    let mut successor = handover::spawn_successor(cmd)?;
+    let handshake = successor.offer(sock, state).and_then(|()| successor.wait_until_ready());
+    if let Err(e) = handshake {
+        successor.abandon();
+        return Err(e);
+    }
+
+    call.stop_receiving();
+    successor.cut_over(call.media_cursor())?;
+    std::thread::sleep(handover::SEND_OVERLAP);
+    println!("handed the call to the new build");
+    Ok(true)
 }
 
 fn relaunch(me: &Path, args: &[String]) -> Result<()> {
