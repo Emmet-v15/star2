@@ -698,13 +698,13 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             Ok(v) => v,
             Err(_) => continue,
         };
-        let Some(h) = MediaHeader::decode(&buf[..n]) else { continue };
-        if h.version != PROTO_VERSION {
+        let Some(header) = MediaHeader::decode(&buf[..n]) else { continue };
+        if header.version != PROTO_VERSION {
             continue;
         }
         let payload = &buf[MEDIA_HEADER_LEN..n];
 
-        if h.is_reflex() {
+        if header.is_reflex() {
             if let Ok(addr) = std::str::from_utf8(payload) {
                 let mut slot = shared.reflex.lock().unwrap();
                 if slot.is_none() {
@@ -715,10 +715,10 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             continue;
         }
 
-        if h.is_punch() {
+        if header.is_punch() {
 
             if let Some((peer, ms)) =
-                handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, h.session, payload)
+                handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, header.session, payload)
             {
                 on_event(Event::Direct { peer, ms });
             }
@@ -729,13 +729,13 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             continue;
         }
         shared.p2p.lock().unwrap().last_peer_rx = Instant::now();
-        if h.is_keepalive() {
+        if header.is_keepalive() {
             continue;
         }
 
-        shared.peer_wants_red.store(h.red_wanted(), Ordering::Relaxed);
+        shared.peer_wants_red.store(header.red_wanted(), Ordering::Relaxed);
 
-        let (red, data) = match h.is_red() {
+        let (red, data) = match header.is_red() {
             true => match star2_proto::split_red(payload) {
                 Some((prev, cur)) => (Some(prev.to_vec()), cur),
                 None => continue,
@@ -745,19 +745,19 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
 
         let arr_ms = base.elapsed().as_secs_f64() * 1000.0;
         let mut inbox = shared.inbox.lock().unwrap();
-        let sb = inbox.entry(h.session).or_default();
+        let sb = inbox.entry(header.session).or_default();
         if let (Some(la), Some(lt)) = (sb.last_arr_ms, sb.last_ts) {
 
             let d_arr = arr_ms - la;
-            let d_ts = (h.timestamp.wrapping_sub(lt)) as f64 / (SR as f64 / 1000.0);
+            let d_ts = (header.timestamp.wrapping_sub(lt)) as f64 / (SR as f64 / 1000.0);
             sb.est.observe((d_arr - d_ts).abs());
         }
         sb.last_arr_ms = Some(arr_ms);
-        sb.last_ts = Some(h.timestamp);
+        sb.last_ts = Some(header.timestamp);
         sb.recv_count += 1;
         sb.insert_capped(
-            h.seq,
-            AudioPkt { flags: h.flags, data: data.to_vec(), red, arr: Instant::now() },
+            header.seq,
+            AudioPkt { flags: header.flags, data: data.to_vec(), red, arr: Instant::now() },
         );
     }
 }
@@ -856,9 +856,9 @@ fn encode_loop(
             pcm_i16[i] = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
         }
         let session = shared.my_session();
-        let mut hdr_flags = base_flags;
+        let mut header_flags = base_flags;
         if shared.want_red.load(Ordering::Relaxed) {
-            hdr_flags |= flags::RED_WANTED;
+            header_flags |= flags::RED_WANTED;
         }
         if let Ok(len) = enc.encode(&pcm_i16, &mut enc_buf) {
             let carry = shared.peer_wants_red.load(Ordering::Relaxed)
@@ -866,7 +866,7 @@ fn encode_loop(
                 && MEDIA_HEADER_LEN + RED_LEN_BYTES + red_prev.len() + len <= PKT_BUF;
             let end = match carry {
                 true => {
-                    hdr_flags |= flags::RED;
+                    header_flags |= flags::RED;
                     let at = MEDIA_HEADER_LEN;
                     let n = red_prev.len();
                     dg[at..at + RED_LEN_BYTES].copy_from_slice(&(n as u16).to_be_bytes());
@@ -883,7 +883,7 @@ fn encode_loop(
             };
             red_prev.clear();
             red_prev.extend_from_slice(&enc_buf[..len]);
-            MediaHeader::new(session, seq, ts, hdr_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
+            MediaHeader::new(session, seq, ts, header_flags).encode(&mut dg[..MEDIA_HEADER_LEN]);
             if sock.send_to(&dg[..end], dst).is_ok() {
                 shared.tx_pkts.fetch_add(1, Ordering::Relaxed);
                 shared.enc_sum_us.fetch_add(enc_start.elapsed().as_micros() as u64, Ordering::Relaxed);

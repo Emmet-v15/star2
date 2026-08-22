@@ -112,13 +112,13 @@ pub(crate) fn handle_punch(
     route: &MediaRoute,
     sock: &UdpSocket,
     src: SocketAddr,
-    hdr_session: SessionId,
+    claimed_session: SessionId,
     payload: &[u8],
 ) -> Option<(SocketAddr, u64)> {
     let pr = PunchProbe::decode(payload)?;
     let mut s = p2p.lock().unwrap();
 
-    if s.peer_session != Some(hdr_session) || pr.nonce != s.local_nonce {
+    if s.peer_session != Some(claimed_session) || pr.nonce != s.local_nonce {
         return None;
     }
     if s.phase == P2pPhase::Idle {
