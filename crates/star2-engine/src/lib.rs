@@ -176,10 +176,9 @@ impl CallHandle {
     }
 
     pub fn hand_off_point(&self) -> handover::Cutover {
-        let lead = handover::SEND_OVERLAP.as_millis() as u32 / FRAME_MS;
         handover::Cutover {
-            seq: (self.shared.seq.load(Ordering::Relaxed) as u16).wrapping_add(lead as u16),
-            ts: self.shared.ts.load(Ordering::Relaxed).wrapping_add(lead * FRAME as u32),
+            seq: self.shared.seq.load(Ordering::Relaxed) as u16,
+            ts: self.shared.ts.load(Ordering::Relaxed),
         }
     }
 
@@ -842,12 +841,14 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
         let arr_ms = base.elapsed().as_secs_f64() * 1000.0;
         let mut inbox = shared.inbox.lock().unwrap();
         let sb = inbox.entry(header.session).or_default();
-        if let (Some(la), Some(lt)) = (sb.last_arr_ms, sb.last_ts) {
-
-            sb.est.observe(arrival_skew_ms(arr_ms - la, header.timestamp, lt));
+        if carries_the_stream_forward(sb.last_seq, header.seq) {
+            if let (Some(la), Some(lt)) = (sb.last_arr_ms, sb.last_ts) {
+                sb.est.observe(arrival_skew_ms(arr_ms - la, header.timestamp, lt));
+            }
+            sb.last_arr_ms = Some(arr_ms);
+            sb.last_ts = Some(header.timestamp);
+            sb.last_seq = Some(header.seq);
         }
-        sb.last_arr_ms = Some(arr_ms);
-        sb.last_ts = Some(header.timestamp);
         sb.recv_count += 1;
         sb.insert_capped(
             header.seq,
@@ -899,6 +900,10 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
             P2pPhase::Idle => {}
         }
     }
+}
+
+fn carries_the_stream_forward(last_seq: Option<u16>, seq: u16) -> bool {
+    last_seq.is_none_or(|last| seq_lt(last, seq))
 }
 
 fn arrival_skew_ms(d_arr_ms: f64, ts: u32, last_ts: u32) -> f64 {
@@ -1264,6 +1269,21 @@ fn playout_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replayed_or_reordered_frame_is_not_measured_as_jitter() {
+        assert!(carries_the_stream_forward(None, 500), "the first frame of a call went unmeasured");
+        assert!(carries_the_stream_forward(Some(500), 501));
+        assert!(carries_the_stream_forward(Some(65_535), 0), "the estimator stops at the seq wrap");
+        assert!(
+            !carries_the_stream_forward(Some(500), 500),
+            "a duplicate frame was measured, so the send overlap during a handover reads as jitter"
+        );
+        assert!(
+            !carries_the_stream_forward(Some(500), 476),
+            "a reordered frame was measured, so its age reads as jitter and pins the buffer at              its ceiling"
+        );
+    }
 
     #[test]
     fn a_rewound_timestamp_is_read_as_a_small_step_not_a_lifetime_of_jitter() {

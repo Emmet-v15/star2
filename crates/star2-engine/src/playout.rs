@@ -262,6 +262,7 @@ pub(crate) struct SenderBuf {
     pub(crate) pkts: HashMap<u16, AudioPkt>,
     pub(crate) est: DelayEstimator,
     pub(crate) last_arr_ms: Option<f64>,
+    pub(crate) last_seq: Option<u16>,
     pub(crate) last_ts: Option<u32>,
 
     pub(crate) recv_count: u64,
