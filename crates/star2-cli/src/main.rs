@@ -59,21 +59,20 @@ fn main() -> Result<()> {
         return list_devices();
     }
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let me = std::env::current_exe().context("locate the running binary")?;
+    let _ = std::fs::remove_file(me.with_extension("old"));
+
+    if block_on(check_for_update(&me)) {
+        return relaunch(&me, &raw);
+    }
+
     let mut args = resolve_room(raw);
     if !args.iter().any(|a| a == "--room") {
         if let Some(token) = ask_for_room() {
             args.push("--room".into());
             args.push(token);
         }
-    }
-
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let me = std::env::current_exe().context("locate the running binary")?;
-    let _ = std::fs::remove_file(me.with_extension("old"));
-
-    if block_on(check_for_update(&me)) {
-        relaunch(&me, &args);
-        return Ok(());
     }
 
     let (cfg, stats) = parse(&args)?;
@@ -97,8 +96,7 @@ fn main() -> Result<()> {
         if RESTART.load(Ordering::Relaxed) {
             println!("[star2] restarting into the new build");
             call.stop();
-            relaunch(&me, &args);
-            return Ok(());
+            return relaunch(&me, &args);
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Event::Status(s)) => println!("[star2] {s}"),
@@ -153,10 +151,12 @@ fn parse(args: &[String]) -> Result<(CallConfig, bool)> {
     Ok((cfg, stats))
 }
 
-fn relaunch(me: &Path, args: &[String]) {
-    if let Err(e) = Command::new(me).args(args).spawn() {
-        eprintln!("[star2] relaunch failed ({e}) - start star2 again by hand");
-    }
+fn relaunch(me: &Path, args: &[String]) -> Result<()> {
+    let status = Command::new(me)
+        .args(args)
+        .status()
+        .context("relaunch into the new build - start star2 again by hand")?;
+    std::process::exit(status.code().unwrap_or(0));
 }
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
