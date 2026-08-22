@@ -106,6 +106,23 @@ mod tests {
     }
 
     #[test]
+    fn playout_downsamples_to_a_441_device_without_drifting() {
+        let mut r = Resampler::new(48_000, 44_100, 2);
+        let block = vec![0.5f32; crate::STEREO_FRAME];
+        let mut total = 0;
+        for _ in 0..200 {
+            let mut out = Vec::new();
+            r.process(&block, &mut out);
+            total += out.len() / 2;
+        }
+        assert!(
+            (total as i64 - 44_100).abs() < 50,
+            "one second of audio came out as {total} frames at 44.1 kHz, so playout drifts \
+             against the device and eventually underruns"
+        );
+    }
+
+    #[test]
     fn upsample_rate_is_stable_across_blocks() {
         let mut r = Resampler::new(44_100, 48_000, 1);
         let src = vec![0.5f32; 441];
