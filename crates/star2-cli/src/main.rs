@@ -147,6 +147,7 @@ fn main() -> Result<()> {
 
 fn parse(args: &[String]) -> Result<(CallConfig, bool)> {
     let mut cfg = CallConfig::default();
+    cfg.build = env!("CARGO_PKG_VERSION").into();
     let mut bitrate: Option<i32> = None;
     let mut stats = false;
     let mut it = args.iter().cloned();
@@ -193,8 +194,8 @@ fn hand_over(me: &Path, args: &[String], call: &CallHandle) -> Result<bool> {
     }
 
     call.stop_receiving();
+    call.stop_sending();
     successor.cut_over(call.hand_off_point())?;
-    std::thread::sleep(handover::SEND_OVERLAP);
     println!("handed the call to the new build");
     Ok(true)
 }

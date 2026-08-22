@@ -4,7 +4,7 @@ members = ["crates/star2-proto", "crates/star2-rendezvous", "crates/star2-engine
 
 [workspace.package]
 edition = "2021"
-version = "0.3.20"
+version = "0.3.25"
 license = "MIT"
 
 [workspace.dependencies]
@@ -20,8 +20,8 @@ star2-proto = { path = "crates/star2-proto" }
 # The rendezvous server runs on a small loaded aarch64 box: optimize for size.
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
 
 # Keep the audio DSP usable in debug builds while staying quick to recompile.

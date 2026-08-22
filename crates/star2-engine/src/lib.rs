@@ -102,6 +102,8 @@ pub struct CallConfig {
     pub output: String,
 
     pub dev_buf_ms: u32,
+
+    pub build: String,
 }
 
 impl Default for CallConfig {
@@ -117,6 +119,7 @@ impl Default for CallConfig {
             input: String::new(),
             output: String::new(),
             dev_buf_ms: 0,
+            build: String::new(),
         }
     }
 }
@@ -173,6 +176,10 @@ impl CallHandle {
 
     pub fn stop_receiving(&self) {
         self.shared.rx_stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop_sending(&self) {
+        self.shared.paused.store(true, Ordering::Release);
     }
 
     pub fn hand_off_point(&self) -> handover::Cutover {
@@ -571,7 +578,7 @@ async fn control_loop(
         name: cfg.name.clone(),
         ver: PROTO_VERSION as u32,
         token: cfg.token.clone(),
-        build: env!("CARGO_PKG_VERSION").into(),
+        build: cfg.build.clone(),
     })?;
 
     let mut joined = false;

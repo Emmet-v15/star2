@@ -24,8 +24,6 @@ const HELLO: &[u8] = b"star2-handover-hello";
 const READY: &[u8] = b"star2-handover-ready";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub const SEND_OVERLAP: Duration = Duration::from_millis(120);
-
 fn start_winsock_if_the_adopt_is_the_first_socket_call() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -379,12 +377,11 @@ mod tests {
             .unwrap();
         successor.wait_until_ready().expect("the new process never took the call");
 
-        let at = Cutover { seq: cursor.load(Ordering::Relaxed) as u16, ts: 0 };
-        successor.cut_over(at).unwrap();
-
-        std::thread::sleep(SEND_OVERLAP);
         stop.store(true, Ordering::Relaxed);
         streaming.join().unwrap();
+
+        let at = Cutover { seq: cursor.load(Ordering::Relaxed) as u16, ts: 0 };
+        successor.cut_over(at).unwrap();
         drop(call);
 
         let mut heard: HashSet<u16> = HashSet::new();
@@ -424,10 +421,16 @@ mod tests {
              {} - the peer would read that as a 65k-frame reorder and stall",
             at.seq
         );
+        let doubled: Vec<u16> = {
+            let mut d: Vec<u16> = from_old.intersection(&from_new).copied().collect();
+            d.sort_unstable();
+            d
+        };
         assert!(
-            last_old >= first_new,
-            "the old build stopped at {last_old} before the new one started at {first_new}, so \
-             both were silent across the seam instead of briefly overlapping"
+            doubled.is_empty(),
+            "both builds sent seq {:?}, so the peer receives every frame in the seam twice and \
+             its playout starves for about 0.4s",
+            &doubled[..doubled.len().min(12)]
         );
         assert!(
             last_new > last_old,
