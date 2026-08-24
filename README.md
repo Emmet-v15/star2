@@ -45,24 +45,28 @@ star2.exe --room general --name me
 
 There is **one** binary and it updates itself. On startup — and again whenever the
 rendezvous server nudges it — it compares its own SHA-256 against the manifest, and if they
-differ it downloads the new build, renames itself to `star2.old` and moves the new
-one into place.
+differ it downloads the new build and stages it beside the running one.
 
 Windows forbids *deleting or overwriting* a running image but permits *renaming*
-one, which is what makes that work without a second supervising process.
+one: the current image becomes `star2.old` and the staged build moves into place.
+The download is verified before any of that touches disk state that matters, so a
+failed update leaves the running build untouched.
 
-Idle, it then relaunches with the same arguments. **Mid-call it hands the call
-over instead**, and the call does not drop. The old process spawns the new one and
-duplicates the live UDP socket into it with `WSADuplicateSocket`, so the local port
-and the NAT mapping survive and the peer keeps talking to the same address.
+Then it restarts into the new build. Idle or mid-call, the path is the same:
+stop the engine, relaunch with the same arguments — the room token rides along,
+so there is never an interactive prompt — and the fresh build rejoins the same
+room and re-punches through the paths every cold start already uses. There is no
+supervising process and no second binary. An update costs each peer a few seconds
+of silence and one redial; the call does not survive the swap by design, and no
+machinery exists to pretend otherwise.
 
-Duplicating a socket does not surrender it, so until the new build says it is
-carrying traffic the old one can still take the call back; a new build that dies on
-startup leaves the call running. The two directions cut over in opposite orders,
-because a shared UDP endpoint splits reads rather than copying them: **receive**
-stops on the old before it starts on the new, and the kernel socket buffer covers
-the gap, while **send** starts on the new before it stops on the old, because a
-duplicate packet is cheap and a hole in the stream is not.
+To keep that rejoin cheap, the outgoing process leaves a tiny restart seed beside
+the binary: the relay's reflex-probe endpoint, the peer's last direct address,
+the room token, and a timestamp. The successor uses them only as accelerators —
+the reflexive probe fires before signalling finishes, and the hinted endpoint
+joins the first candidate wave. Nothing is trusted: every punch still requires
+the nonce exchange over the rendezvous server, and a missing, stale (over 120 s),
+or foreign-room seed is deleted so plain cold-start discovery proceeds silently.
 
 ### How updates arrive
 
@@ -151,30 +155,39 @@ firewalld can be wide open and packets will still never reach the box without it
 
 Verified:
 - Two clients, punch confirmed in 60–160 ms, audio both ways, 0% loss.
+- Two clients on one host against a local rendezvous server, punch confirmed in
+  87/163 ms, media both ways at 200 pkt/s, 0% loss, the full latency chain logged —
+  re-confirmed on the handover-free build.
 - Reflexive discovery through the real NAT (`wss://` rendezvous + UDP 40001).
-- A mid-call update across a real publish, both peers: the call survives, the peer
-  keeps receiving on the same address, and the jitter buffer holds at 20 ms through
-  the cutover.
-- 63 unit tests: wire round-trips, punch authorisation, jitter estimator, resampler,
-  room tokens, argument resolution, packet redundancy, socket handover including a
-  cutover across a real process boundary.
+- 65 unit tests: wire round-trips, punch authorisation and the retry/timeout role
+  split, a full two-state punch over real loopback sockets, restart re-adoption
+  (a fresh controller re-offers to the waiting peer; a fresh responder arms
+  silently), jitter estimator, resampler, room tokens, argument resolution,
+  packet redundancy.
 
 Not yet verified:
 - A punch between two *different* networks. Both test peers shared a LAN candidate,
   so the reflexive path has been discovered but not yet traversed end to end.
+- The update restart end to end across a real publish (stop → swap → relaunch →
+  same room → re-punch). Its pieces are covered: argument stability across
+  relaunch, stage-and-verify swap, and the re-adoption tests above.
 
 ## Known gaps
 
 - **Windows only.** macOS and Android are out of scope until there is a plan that
-  isn't a hand-rolled toolchain per platform.
+  isn't a hand-rolled toolchain per platform. (The engine no longer *requires*
+  Windows at the source level: the socket-duplication handover was the last
+  `std::os::windows` user and is gone.)
 - **Media never falls back through the rendezvous server, by design.** A failed punch ends the call. Symmetric NAT and
   CGNAT (mobile data especially) are the cases that will fail.
-- **A handover still costs one peer about 0.4 s of degraded playout**, spread over
-  the two seconds around the cutover, when both peers update at once — which is the
-  normal case, since one nudge reaches both. The other peer hears roughly a frame.
-  The buffer no longer blows out and nothing resyncs, but §8 asks for neither side
-  hearing it at all, and this is not that yet. The asymmetry is unexplained.
-- A failed punch is fatal rather than dropping back to idle to wait for the peer.
+- **An update interrupts the call.** Both peers drop; each relaunches into the new
+  build and rejoins the room automatically. Seconds of silence, no manual steps -
+  that is the accepted cost of the deleted generational-handover machinery.
+- A failed punch no longer ends the attempt. The controller aborts, backs off (5 s
+  doubling to a 60 s ceiling), and re-offers while both peers stay in the room;
+  from the third failure on it says so honestly ("likely symmetric NAT or CGNAT").
+  What it still never does is relay through the rendezvous server — if the punch
+  cannot succeed, neither can the call.
 - 1:1 only — a third peer in a room ends the call rather than mixing.
 - No encryption of the media payload. The punch nonce is protected by the
   rendezvous TLS, so an off-path attacker cannot redirect media, but an on-path one
