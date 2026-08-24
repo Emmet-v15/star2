@@ -761,7 +761,7 @@ fn on_membership(
         if s.peer_session == Some(peer) {
             return;
         }
-        if s.phase == P2pPhase::Direct && s.last_peer_rx.elapsed() < DIRECT_GRACE {
+        if holds_a_live_direct_call(s.phase, s.last_peer_rx.elapsed()) {
             s.peer_session = Some(peer);
             return;
         }
@@ -782,7 +782,11 @@ fn on_membership(
             debug_line(format!("[engine] punching peer {peer} (controller)"));
         }
     } else if members.len() > 2 {
-
+        let s = shared.p2p.lock().unwrap();
+        if holds_a_live_direct_call(s.phase, s.last_peer_rx.elapsed()) {
+            return;
+        }
+        drop(s);
         go_idle(shared, "room has more than 2 members");
         on_event(Event::Status(format!("idle room has {} members, 1:1 only", members.len())));
     }
@@ -1281,6 +1285,23 @@ fn playout_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_direct_call_outlasts_a_third_member_in_the_room() {
+        assert!(
+            holds_a_live_direct_call(P2pPhase::Direct, Duration::from_millis(200)),
+            "a call with media flowing was torn down because the rendezvous room showed a \
+             third member - a stranger passing through an open room ends real calls this way"
+        );
+        assert!(
+            !holds_a_live_direct_call(P2pPhase::Direct, DIRECT_GRACE + Duration::from_secs(1)),
+            "a direct path that had stopped carrying media was kept alive"
+        );
+        assert!(
+            !holds_a_live_direct_call(P2pPhase::Punching, Duration::from_millis(0)),
+            "a call that had not punched yet refused to give way to a third member"
+        );
+    }
 
     #[test]
     fn a_replayed_or_reordered_frame_is_not_measured_as_jitter() {
