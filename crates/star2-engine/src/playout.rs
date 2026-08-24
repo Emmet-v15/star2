@@ -133,8 +133,8 @@ impl DecState {
                 out.iter_mut().for_each(|x| *x = 0.0);
                 return Playout::Idle;
             }
-            let start = pkts.keys().copied().reduce(|a, b| if seq_lt(a, b) { a } else { b }).unwrap();
-            self.next = Some(start);
+            let newest = pkts.keys().copied().reduce(|a, b| if seq_lt(a, b) { b } else { a }).unwrap();
+            self.next = Some(newest.wrapping_sub(target.max(1) as u16 - 1));
             self.started = true;
         }
         let mut n = self.next.unwrap();
@@ -535,6 +535,35 @@ mod tests {
             e.observe(1.0);
         }
         assert_eq!(e.spike_ms, 0.0, "spike bump must decay away");
+    }
+
+    #[test]
+    fn takeover_does_not_inherit_the_backlog_as_delay() {
+        let mut dec = DecState::new().unwrap();
+        let mut sb = SenderBuf::default();
+        let target = 4;
+        let backlog = target + SHED_MARGIN - 4;
+        for seq in 0..backlog as u16 {
+            sb.insert_capped(seq, AudioPkt { flags: 0, data: vec![], red: None, arr: Instant::now() });
+        }
+        let mut out = vec![0.0f32; STEREO_FRAME];
+        let mut scratch = vec![0i16; FRAME * 2];
+        dec.produce(&mut sb.pkts, target, &mut out, &mut scratch);
+
+        assert_eq!(
+            dec.next,
+            Some((backlog - target + 1) as u16),
+            "playout began at frame {:?}, not {target} frames behind the newest - a build taking \
+             over mid-call would replay what the old build already rendered",
+            dec.next
+        );
+        assert_eq!(
+            sb.pkts.len(),
+            target - 1,
+            "playout started {} frames deep instead of {target} - the startup backlog became \
+             permanent extra latency",
+            sb.pkts.len() + 1
+        );
     }
 
     #[test]
