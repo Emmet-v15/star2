@@ -40,7 +40,7 @@ merged version is slightly worse at the edges.
 ## 4. Scope
 
 - P2P voice, 1:1, low latency. That is the product.
-- **Seamless self-update is a headline feature, not plumbing.** See §8.
+- **Automatic self-update is a headline feature, not plumbing.** See §8.
 - **Rendezvous only** — the rendezvous server brokers the hole punch and answers
   reflexive probes. Media never passes through it and **never falls back through
   it.** A failed punch ends the call.
@@ -71,35 +71,37 @@ merged version is slightly worse at the edges.
 - Every build script lives in `deploy/`. There is no second place to look.
 - Every build is uploaded to v15.studio.
 - **Publishing is never gated on who is mid-call.** Ship the update; live peers
-  take it mid-call, without being asked and without dropping the call (§8).
+  take it without being asked - a mid-call client stops, swaps, relaunches, and
+  rejoins the same room (§8).
 - Never `taskkill //F //IM star2.exe //T` — it kills every peer's client too.
   Always target a PID.
 
-## 8. Updates are seamless, including mid-call
+## 8. Updates are automatic, delivered by restart-and-rejoin
 
 The rendezvous server says a new build exists; the client is running it moments
-later. No prompt, no restart the user has to perform, and **no dropped call** — a peer
-mid-conversation upgrades without either side hearing it happen. This is a goal
-of the project in its own right, not a detail of the build pipeline. Cost that
-buys seamlessness is worth paying; §1 does not apply to it.
-
-The mechanism is generational handoff. The old process spawns the new one and
-duplicates its live UDP socket into it with `WSADuplicateSocket`, so the local
-port and the NAT mapping survive the swap and the peer sees nothing at all.
+later. No prompt, no restart the user has to perform. **The call does not survive
+the swap** - that promise was retired with the generational-handoff architecture.
+What the update promises instead: the client stages and verifies the download,
+stops the engine, renames the new binary into place, and relaunches with the same
+arguments; the fresh build rejoins the same room token and re-punches through the
+exact paths every cold start already uses. An update costs a peer seconds of
+silence and one redial, never a manual step and never a stuck client.
 
 These follow from it, and are settled:
 
-- **The old build must survive a failed handover.** Duplicating a socket does
-  not surrender it. A new build that dies on startup leaves the call running.
-  Never tear the old one down before the new one is carrying traffic.
-- **Carry the media sequence counter across.** A new build that restarts it at
-  zero stalls the peer's jitter buffer. This bug is already in the history once.
-- **Overlap rather than gap.** During cutover, briefly let both builds send
-  instead of neither. A duplicate packet is cheap; a hole in the stream is what
-  §5 forbids.
-- **One binary.** The handoff is between generations, not managed by a parent, so
-  a supervisor buys nothing. The runner/engine split was tried and deleted
-  (`477c190`); do not reintroduce it to solve this.
-- **Terminal, not GUI.** A console is inherited across the handoff. A window
-  would have to be recreated, which is visible. A GUI must justify itself
-  against that cost, not just against §4.
+- **Stage and verify before touching the running image.** A download that fails
+  its hash check leaves the current build running untouched.
+- **Relaunch carries the arguments, especially `--room`.** A relaunched build must
+  never sit at an interactive prompt: stdin belongs to whoever started it.
+- **Reconnect paths are the update surface.** Rendezvous reconnect, roster
+  re-evaluation, and the punch FSM with its retry/backoff are what make a restart
+  cheap; treat their health as update health.
+- **A restart seed is a hint, never a shortcut.** The outgoing build may leave the
+  relay's reflex-probe endpoint and the peer's last direct address beside the
+  binary; the successor fires its reflexive probe early and merges the hint into
+  its candidate list. Nonces still gate every probe, and a missing, stale, or
+  foreign-room seed is discarded silently.
+- **One binary.** No supervisor, no parent process. The runner/engine split was
+  tried and deleted (`477c190`); the socket-duplication handover built on top of
+  it was deleted with the restart model - do not reintroduce either.
+- **Terminal, not GUI.** Decided in §4 on its own merits.
