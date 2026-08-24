@@ -162,6 +162,19 @@ pub(crate) fn p2p_teardown(p2p: &Mutex<P2pState>, route: &MediaRoute, why: &str)
     super::debug_line(format!("[engine] direct path torn down ({why})"));
 }
 
+pub(crate) enum PunchTimeout {
+    AbortAndRetry,
+    StandDown,
+}
+
+pub(crate) fn timeout_action(me: SessionId, peer: SessionId) -> PunchTimeout {
+    if me < peer {
+        PunchTimeout::AbortAndRetry
+    } else {
+        PunchTimeout::StandDown
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +306,93 @@ mod tests {
         }
         s.merge_cand("10.0.0.1:1000".parse().unwrap());
         assert_eq!(s.cands.len(), P2P_MAX_CANDS);
+    }
+
+    #[test]
+    fn only_the_lower_session_id_declares_a_punch_failure() {
+        assert!(
+            matches!(timeout_action(4, 9), PunchTimeout::AbortAndRetry),
+            "the controller (lower session id) did not take the retry decision"
+        );
+        assert!(
+            matches!(timeout_action(9, 4), PunchTimeout::StandDown),
+            "the responder also declared failure, so both sides abort and re-offer over each other"
+        );
+    }
+
+    #[test]
+    fn two_states_punch_each_other_over_real_sockets() {
+        let a_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b_addr = b_sock.local_addr().unwrap();
+        let a_addr = a_sock.local_addr().unwrap();
+        let ra = route();
+        let rb = route();
+        let pa = Mutex::new(P2pState::new());
+        let pb = Mutex::new(P2pState::new());
+        let mut buf = [0u8; 2048];
+
+        {
+            let mut a = pa.lock().unwrap();
+            a.peer_session = Some(7);
+            a.local_nonce = 42;
+            a.remote_nonce = Some(99);
+            a.phase = P2pPhase::Punching;
+            a.merge_cand(b_addr);
+            let txid = a.new_txid();
+            send_punch(&a_sock, 1, PUNCH_PROBE, 99, txid, b_addr, true);
+
+            let mut b = pb.lock().unwrap();
+            b.peer_session = Some(1);
+            b.local_nonce = 99;
+            b.remote_nonce = Some(42);
+            b.phase = P2pPhase::Punching;
+        }
+
+        let (n, src) = b_sock.recv_from(&mut buf).unwrap();
+        assert_eq!(
+            handle_punch(7, &pb, &rb, &b_sock, src, 1, &buf[MEDIA_HEADER_LEN..n]),
+            None,
+            "answering a probe was read as a completed punch"
+        );
+        assert!(
+            pb.lock().unwrap().cands.contains(&a_addr),
+            "the probe never taught B where A really sends from"
+        );
+
+        let (n, src) = a_sock.recv_from(&mut buf).unwrap();
+        assert_eq!(
+            handle_punch(1, &pa, &ra, &a_sock, src, 7, &buf[MEDIA_HEADER_LEN..n]).map(|(p, _)| p),
+            Some(b_addr),
+            "A's own probe ACK did not promote the path to direct"
+        );
+        assert_eq!(pa.lock().unwrap().phase, P2pPhase::Direct);
+        assert_eq!(*ra.dst.lock().unwrap(), Some(b_addr));
+        assert!(pa.lock().unwrap().rtt_us.is_some(), "a confirmed ACK carried no rtt");
+
+        {
+            let mut b = pb.lock().unwrap();
+            b.merge_cand(a_addr);
+            b.phase = P2pPhase::Punching;
+            let txid = b.new_txid();
+            send_punch(&b_sock, 7, PUNCH_PROBE, 42, txid, a_addr, true);
+        }
+
+        let (n, src) = a_sock.recv_from(&mut buf).unwrap();
+        assert_eq!(handle_punch(1, &pa, &ra, &a_sock, src, 7, &buf[MEDIA_HEADER_LEN..n]), None);
+
+        let (n, src) = b_sock.recv_from(&mut buf).unwrap();
+        assert_eq!(
+            handle_punch(7, &pb, &rb, &b_sock, src, 1, &buf[MEDIA_HEADER_LEN..n]).map(|(p, _)| p),
+            Some(a_addr),
+            "B's probe ACK never came back or was rejected"
+        );
+        assert_eq!(pb.lock().unwrap().phase, P2pPhase::Direct);
+        assert_eq!(*rb.dst.lock().unwrap(), Some(a_addr));
+        assert_ne!(
+            *ra.dst.lock().unwrap(),
+            *rb.dst.lock().unwrap(),
+            "both ends pinned the same destination - one of them is pointing at itself"
+        );
     }
 }

@@ -8,15 +8,17 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use star2_engine::{handover, start_call, CallConfig, CallHandle, Event};
+use star2_engine::{start_call, CallConfig, Event};
 use tokio_tungstenite::tungstenite::Message;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
 const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_secs(30);
+const SEED_MAX_AGE_SECS: u64 = 120;
 
 static RESTART: AtomicBool = AtomicBool::new(false);
 
@@ -51,6 +53,60 @@ struct Manifest {
     url: String,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct SeedFile {
+    room: String,
+    ts: u64,
+    relay: String,
+    peer: String,
+}
+
+fn seed_path(me: &Path) -> PathBuf {
+    me.with_extension("restart-seed.json")
+}
+
+fn raw_room(raw: &[String]) -> Option<&str> {
+    raw.iter().position(|a| a == "--room").and_then(|i| raw.get(i + 1)).map(|s| s.as_str())
+}
+
+fn write_restart_seed(me: &Path, room: &str, route: Option<(std::net::SocketAddr, String)>) {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else { return };
+    let seed = SeedFile {
+        room: room.to_string(),
+        ts: now.as_secs(),
+        relay: route.as_ref().map(|(_, r)| r.clone()).unwrap_or_default(),
+        peer: route.map(|(p, _)| p.to_string()).unwrap_or_default(),
+    };
+    let Ok(json) = serde_json::to_string(&seed) else { return };
+    let tmp = me.with_extension("restart-seed.tmp");
+    if std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, seed_path(me))).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn load_restart_seed(me: &Path, room: &str) -> Option<SeedFile> {
+    let path = seed_path(me);
+    let txt = std::fs::read_to_string(&path).ok()?;
+    let seed: SeedFile = match serde_json::from_str(&txt) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    if seed.room != room {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) if now.as_secs().saturating_sub(seed.ts) <= SEED_MAX_AGE_SECS => Some(seed),
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            None
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.iter().any(|a| a == "-h" || a == "--help") {
@@ -64,34 +120,33 @@ fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let me = std::env::current_exe().context("locate the running binary")?;
 
-    let taking_over = raw.iter().any(|a| a == handover::FLAG);
-    let raw: Vec<String> = raw.into_iter().filter(|a| a != handover::FLAG).collect();
-
-    let mut predecessor = taking_over
-        .then(handover::answer_predecessor)
-        .transpose()
-        .context("answer the old build")?;
-
-    let (args, inherited) = if let Some(p) = predecessor.as_mut() {
-        (raw, Some(p.inherit_call().context("take the call from the old build")?))
+    let _ = std::fs::remove_file(me.with_extension("old"));
+    let seed = raw_room(&raw).and_then(|room| load_restart_seed(&me, room));
+    let updated = if seed.is_some() {
+        false
     } else {
-        let _ = std::fs::remove_file(me.with_extension("old"));
-        let updated = block_on(check_for_update(&me));
-
-        let mut args = resolve_room(raw);
-        if !args.iter().any(|a| a == "--room") {
-            if let Some(token) = ask_for_room() {
-                args.push("--room".into());
-                args.push(token);
-            }
-        }
-        if updated {
-            return relaunch(&me, &args);
-        }
-        (args, None)
+        block_on(check_for_update(&me))
     };
 
-    let (cfg, stats) = parse(&args)?;
+    let mut args = resolve_room(raw);
+    if !args.iter().any(|a| a == "--room") {
+        if let Some(token) = ask_for_room() {
+            args.push("--room".into());
+            args.push(token);
+        }
+    }
+    if updated {
+        return relaunch(&me, &args);
+    }
+
+    let (mut cfg, stats) = parse(&args)?;
+    let room_for_seed = cfg.room_token.clone();
+    if let Some(s) = seed {
+        println!("rejoin seed accepted");
+        cfg.seed_relay = s.relay;
+        cfg.seed_peer = s.peer;
+        let _ = std::fs::remove_file(seed_path(&me));
+    }
     println!(
         "star2 {}  {}  {}  {} kbps",
         env!("CARGO_PKG_VERSION"),
@@ -102,30 +157,18 @@ fn main() -> Result<()> {
     println!("room {}", cfg.room_token);
 
     let (tx, rx) = channel();
-    let call = start_call(cfg, inherited, move |e| {
+    let call = start_call(cfg, move |e| {
         let _ = tx.send(e);
     })?;
-
-    if let Some(p) = predecessor.as_mut() {
-        p.announce_ready()?;
-        let at = p.wait_for_cutover()?;
-        call.resume_from(at);
-        println!("took the call over mid-stream at seq {}", at.seq);
-    }
 
     watch_for_updates(me.clone());
 
     loop {
         if RESTART.swap(false, Ordering::Relaxed) {
-            match hand_over(&me, &args, &call) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    println!("update restarting");
-                    call.stop();
-                    return relaunch(&me, &args);
-                }
-                Err(e) => println!("update deferred, call unaffected: {e:#}"),
-            }
+            println!("update restarting");
+            write_restart_seed(&me, &room_for_seed, call.last_route());
+            call.stop();
+            return relaunch(&me, &args);
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Event::Status(s)) => println!("{s}"),
@@ -179,25 +222,6 @@ fn parse(args: &[String]) -> Result<(CallConfig, bool)> {
         }
     }
     Ok((cfg, stats))
-}
-
-fn hand_over(me: &Path, args: &[String], call: &CallHandle) -> Result<bool> {
-    let Some((sock, state)) = call.live_call() else { return Ok(false) };
-
-    let mut cmd = Command::new(me);
-    cmd.args(args).arg(handover::FLAG);
-    let mut successor = handover::spawn_successor(cmd)?;
-    let handshake = successor.offer(sock, state).and_then(|()| successor.wait_until_ready());
-    if let Err(e) = handshake {
-        successor.abandon();
-        return Err(e);
-    }
-
-    call.stop_receiving();
-    call.stop_sending();
-    successor.cut_over(call.hand_off_point())?;
-    println!("handed the call to the new build");
-    Ok(true)
 }
 
 fn relaunch(me: &Path, args: &[String]) -> Result<()> {
@@ -397,7 +421,7 @@ fn list_devices() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, resolve_room};
+    use super::{load_restart_seed, parse, resolve_room, seed_path, write_restart_seed};
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
@@ -479,6 +503,49 @@ mod tests {
         let (stereo, _) = parse(&v(&["--room", "general", "--stereo"])).unwrap();
         assert!(stereo.stereo);
         assert_eq!(stereo.bitrate, 256_000);
+    }
+
+    #[test]
+    fn a_fresh_seed_for_the_same_room_is_honored() {
+        let me = std::env::temp_dir().join(format!("star2-seedtest-{}.exe", std::process::id()));
+        let _ = std::fs::remove_file(seed_path(&me));
+
+        write_restart_seed(
+            &me,
+            "general",
+            Some(("203.0.113.7:51820".parse().unwrap(), "empire:40001".into())),
+        );
+        let s = load_restart_seed(&me, "general").expect("a just-written seed must validate");
+        assert_eq!(s.peer, "203.0.113.7:51820", "the peer endpoint is the whole point of the seed");
+        assert_eq!(s.relay, "empire:40001");
+        assert!(
+            seed_path(&me).exists(),
+            "loading must not consume a valid seed - only the caller deletes it once applied"
+        );
+
+        let _ = std::fs::remove_file(seed_path(&me));
+    }
+
+    #[test]
+    fn an_expired_foreign_or_broken_seed_is_discarded_silently() {
+        let me =
+            std::env::temp_dir().join(format!("star2-seedtest-bad-{}.exe", std::process::id()));
+        let _ = std::fs::remove_file(seed_path(&me));
+
+        assert_eq!(load_restart_seed(&me, "general"), None, "no seed file means no seed");
+
+        std::fs::write(seed_path(&me), r#"{"room":"general","ts":0,"relay":"","peer":""}"#).unwrap();
+        assert_eq!(load_restart_seed(&me, "general"), None, "ts=0 is ancient history");
+        assert!(!seed_path(&me).exists(), "a rejected seed must not linger for the next cold start");
+
+        std::fs::write(seed_path(&me), r#"{"room":"elsewhere","ts":9999999999,"relay":"x","peer":"y"}"#)
+            .unwrap();
+        assert_eq!(load_restart_seed(&me, "general"), None, "another room's seed is foreign");
+        assert!(!seed_path(&me).exists());
+
+        std::fs::write(seed_path(&me), "{not json").unwrap();
+        assert_eq!(load_restart_seed(&me, "general"), None, "a broken seed is not a crash");
+        assert!(!seed_path(&me).exists());
     }
 
     #[test]

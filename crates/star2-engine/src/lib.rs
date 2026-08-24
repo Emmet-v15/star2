@@ -18,7 +18,6 @@ use star2_proto::{
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 mod audio;
-pub mod handover;
 mod p2p;
 mod playout;
 
@@ -56,6 +55,9 @@ const P2P_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 const P2P_PUNCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 const P2P_DIRECT_DEAD: Duration = Duration::from_secs(5);
+const P2P_RETRY_FIRST: Duration = Duration::from_secs(5);
+const P2P_RETRY_MAX_SECS: u64 = 60;
+const PUNCH_VERDICT_AFTER: u32 = 3;
 const P2P_MAX_CANDS: usize = 8;
 const P2P_MAX_TXIDS: usize = 256;
 const PKT_BUF: usize = 4096;
@@ -103,6 +105,9 @@ pub struct CallConfig {
 
     pub dev_buf_ms: u32,
 
+    pub seed_relay: String,
+    pub seed_peer: String,
+
     pub build: String,
 }
 
@@ -119,6 +124,8 @@ impl Default for CallConfig {
             input: String::new(),
             output: String::new(),
             dev_buf_ms: 0,
+            seed_relay: String::new(),
+            seed_peer: String::new(),
             build: String::new(),
         }
     }
@@ -139,7 +146,6 @@ pub struct CallHandle {
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
     shared: Arc<Shared>,
-    sock: UdpSocket,
 
     _streams: (cpal::Stream, cpal::Stream),
 }
@@ -149,50 +155,17 @@ impl CallHandle {
         self.shutdown();
     }
 
+    pub fn last_route(&self) -> Option<(SocketAddr, String)> {
+        let dst = *self.shared.route.dst.lock().unwrap();
+        let relay = self.shared.welcome_relay.lock().unwrap().clone();
+        Some((dst?, relay?))
+    }
+
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
-    }
-
-    pub fn live_call(&self) -> Option<(&UdpSocket, handover::CallState)> {
-        let s = self.shared.p2p.lock().unwrap();
-        if s.phase != P2pPhase::Direct {
-            return None;
-        }
-        Some((
-            &self.sock,
-            handover::CallState {
-                socket: String::new(),
-                peer_addr: (*self.shared.route.dst.lock().unwrap())?,
-                media_session: self.shared.my_session(),
-                peer_session: s.peer_session?,
-                local_nonce: s.local_nonce,
-                remote_nonce: s.remote_nonce?,
-            },
-        ))
-    }
-
-    pub fn stop_receiving(&self) {
-        self.shared.rx_stop.store(true, Ordering::Relaxed);
-    }
-
-    pub fn stop_sending(&self) {
-        self.shared.paused.store(true, Ordering::Release);
-    }
-
-    pub fn hand_off_point(&self) -> handover::Cutover {
-        handover::Cutover {
-            seq: self.shared.seq.load(Ordering::Relaxed) as u16,
-            ts: self.shared.ts.load(Ordering::Relaxed),
-        }
-    }
-
-    pub fn resume_from(&self, at: handover::Cutover) {
-        self.shared.seq.store(at.seq as u32, Ordering::Relaxed);
-        self.shared.ts.store(at.ts, Ordering::Relaxed);
-        self.shared.paused.store(false, Ordering::Release);
     }
 }
 
@@ -206,11 +179,17 @@ struct Shared {
     session: Mutex<Option<SessionId>>,
 
     reflex: Mutex<Option<String>>,
+    welcome_relay: Mutex<Option<String>>,
     inbox: Mutex<HashMap<SessionId, SenderBuf>>,
     p2p: Mutex<P2pState>,
     route: MediaRoute,
 
     members: Mutex<HashSet<SessionId>>,
+
+    seed_peer: Option<SocketAddr>,
+
+    punch_attempts: AtomicU32,
+    retry_at: Mutex<Option<Instant>>,
 
     ctrl_tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
 
@@ -228,12 +207,6 @@ struct Shared {
     peer_wants_red: AtomicBool,
     want_red: AtomicBool,
     stop: Arc<AtomicBool>,
-
-    inherited_call: bool,
-    paused: AtomicBool,
-    rx_stop: AtomicBool,
-    seq: AtomicU32,
-    ts: AtomicU32,
 }
 
 fn go_idle(shared: &Arc<Shared>, why: &str) {
@@ -250,11 +223,61 @@ fn abandon(
     if let Some(p) = peer {
         shared.send_ctrl(ClientMsg::P2pAbort { to: p });
     }
+    *shared.retry_at.lock().unwrap() = None;
     go_idle(shared, why);
     on_event(Event::Status(format!("idle {why}")));
 
     let members = shared.members.lock().unwrap().clone();
     on_membership(shared, &members, on_event);
+}
+
+fn punch_failed(
+    shared: &Arc<Shared>,
+    on_event: &Arc<dyn Fn(Event) + Send + Sync>,
+    peer: Option<SessionId>,
+    controller: bool,
+) {
+    if !controller {
+        go_idle(shared, "punch timed out, standing down as responder");
+        return;
+    }
+    let attempt = shared.punch_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Some(p) = peer {
+        shared.send_ctrl(ClientMsg::P2pAbort { to: p });
+    }
+    go_idle(shared, "punch failed");
+    let wait = punch_backoff(attempt);
+    *shared.retry_at.lock().unwrap() = Some(Instant::now() + wait);
+    let verdict = if attempt >= PUNCH_VERDICT_AFTER {
+        " - likely symmetric NAT or CGNAT, and there is no relay fallback by design"
+    } else {
+        ""
+    };
+    on_event(Event::Status(format!(
+        "punch failed ({attempt}) - retrying in {}s{verdict}",
+        wait.as_secs()
+    )));
+}
+
+fn punch_retry_due(shared: &Arc<Shared>) -> bool {
+    let mut at = shared.retry_at.lock().unwrap();
+    match *at {
+        Some(t) if Instant::now() >= t => {
+            *at = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn punch_backoff(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(4);
+    Duration::from_secs(
+        P2P_RETRY_FIRST
+            .as_secs()
+            .saturating_mul(1 << shift)
+            .min(P2P_RETRY_MAX_SECS),
+    )
 }
 
 fn to_dbfs(peak: f32) -> f32 {
@@ -263,6 +286,10 @@ fn to_dbfs(peak: f32) -> f32 {
     } else {
         20.0 * peak.log10()
     }
+}
+
+fn seed_addr(s: &str) -> Option<SocketAddr> {
+    s.trim().parse().ok()
 }
 
 impl Shared {
@@ -276,11 +303,7 @@ impl Shared {
     }
 }
 
-pub fn start_call<F>(
-    cfg: CallConfig,
-    inherited: Option<handover::Inherited>,
-    on_event: F,
-) -> Result<CallHandle>
+pub fn start_call<F>(cfg: CallConfig, on_event: F) -> Result<CallHandle>
 where
     F: Fn(Event) + Send + Sync + 'static,
 {
@@ -289,21 +312,21 @@ where
     let stop = Arc::new(AtomicBool::new(false));
     let send_ch = if cfg.stereo { 2 } else { 1 };
 
-    let taken = inherited.as_ref().map(|i| i.call.clone());
-    let sock = match inherited {
-        Some(i) => i.sock,
-        None => UdpSocket::bind("0.0.0.0:0")?,
-    };
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_read_timeout(Some(Duration::from_millis(100)))?;
     let local_port = sock.local_addr()?.port();
 
     let shared = Arc::new(Shared {
-        session: Mutex::new(taken.as_ref().map(|c| c.media_session)),
+        session: Mutex::new(None),
         reflex: Mutex::new(None),
+        welcome_relay: Mutex::new(None),
         inbox: Mutex::new(HashMap::new()),
         p2p: Mutex::new(P2pState::new()),
         route: MediaRoute { dst: Mutex::new(None), allowed: Mutex::new(HashSet::new()) },
         members: Mutex::new(HashSet::new()),
+        seed_peer: seed_addr(&cfg.seed_peer),
+        punch_attempts: AtomicU32::new(0),
+        retry_at: Mutex::new(None),
         ctrl_tx: Mutex::new(None),
         tx_pkts: AtomicU64::new(0),
         mic_peak: AtomicU32::new(0),
@@ -316,25 +339,7 @@ where
         peer_wants_red: AtomicBool::new(false),
         want_red: AtomicBool::new(true),
         stop: stop.clone(),
-        inherited_call: taken.is_some(),
-        paused: AtomicBool::new(taken.is_some()),
-        rx_stop: AtomicBool::new(false),
-        seq: AtomicU32::new(0),
-        ts: AtomicU32::new(0),
     });
-
-    if let Some(c) = &taken {
-        let mut s = shared.p2p.lock().unwrap();
-        s.phase = P2pPhase::Direct;
-        s.peer_session = Some(c.peer_session);
-        s.local_nonce = c.local_nonce;
-        s.remote_nonce = Some(c.remote_nonce);
-        s.last_peer_rx = Instant::now();
-        s.merge_cand(c.peer_addr);
-        drop(s);
-        *shared.route.dst.lock().unwrap() = Some(c.peer_addr);
-        shared.route.allowed.lock().unwrap().insert(c.peer_addr);
-    }
 
     let host = cpal::default_host();
     let input = pick_device(&host, &cfg.input, true)?;
@@ -555,7 +560,7 @@ where
         })?
     });
 
-    Ok(CallHandle { stop, threads, shared, sock, _streams: (in_stream, out_stream) })
+    Ok(CallHandle { stop, threads, shared, _streams: (in_stream, out_stream) })
 }
 
 async fn control_loop(
@@ -581,6 +586,13 @@ async fn control_loop(
         build: cfg.build.clone(),
     })?;
 
+    if let Some(dst) = seed_addr(&cfg.seed_relay) {
+        let mut probe = [0u8; MEDIA_HEADER_LEN];
+        MediaHeader::new(0, 0, 0, flags::REFLEX | flags::KEEPALIVE).encode(&mut probe);
+        let _ = sock.send_to(&probe, dst);
+        debug_line(format!("[engine] seeded reflex probe to {dst}"));
+    }
+
     let mut joined = false;
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -600,14 +612,8 @@ async fn control_loop(
                 let Ok(sm) = serde_json::from_str::<ServerMsg>(&txt) else { continue };
                 match sm {
                     ServerMsg::Welcome { session, reflex } => {
-                        if shared.inherited_call {
-                            debug_line(format!(
-                                "[engine] rendezvous session {session}, call carries on as {}",
-                                shared.my_session()
-                            ));
-                            continue;
-                        }
                         *shared.session.lock().unwrap() = Some(session);
+                        *shared.welcome_relay.lock().unwrap() = Some(reflex.clone());
                         debug_line(format!("[engine] session {session}, reflex via {reflex}"));
 
                         discover_reflex(shared, sock, &reflex, session).await;
@@ -769,6 +775,9 @@ fn on_membership(
         let my_cands = s.my_cands.clone();
         *s = P2pState::new();
         shared.inbox.lock().unwrap().clear();
+        if let Some(p) = shared.seed_peer {
+            s.merge_cand(p);
+        }
         s.peer_session = Some(peer);
         s.local_nonce = rand_u64();
         s.my_cands = my_cands.clone();
@@ -792,14 +801,14 @@ fn on_membership(
     }
 }
 
+fn holds_a_live_direct_call(phase: P2pPhase, since_peer_rx: Duration) -> bool {
+    phase == P2pPhase::Direct && since_peer_rx < DIRECT_GRACE
+}
+
 fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event) + Send + Sync>) {
     let mut buf = vec![0u8; PKT_BUF];
     let base = Instant::now();
-    while !shared.stop.load(Ordering::Relaxed) && !shared.rx_stop.load(Ordering::Relaxed) {
-        if shared.paused.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        }
+    while !shared.stop.load(Ordering::Relaxed) {
         let (n, src) = match sock.recv_from(&mut buf) {
             Ok(v) => v,
             Err(_) => continue,
@@ -826,6 +835,8 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
             if let Some((peer, ms)) =
                 handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, header.session, payload)
             {
+                shared.punch_attempts.store(0, Ordering::Relaxed);
+                *shared.retry_at.lock().unwrap() = None;
                 on_event(Event::Direct { peer, ms });
             }
             continue;
@@ -877,13 +888,10 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
             P2pPhase::Punching => {
                 if s.started.elapsed() > P2P_PUNCH_TIMEOUT {
                     let peer = s.peer_session;
+                    let controller = peer
+                        .is_some_and(|p| matches!(timeout_action(me, p), PunchTimeout::AbortAndRetry));
                     drop(s);
-                    abandon(
-                        shared,
-                        on_event,
-                        peer,
-                        "punch failed, no direct path (symmetric NAT/CGNAT?)",
-                    );
+                    punch_failed(shared, on_event, peer, controller);
                     continue;
                 }
 
@@ -908,7 +916,13 @@ fn punch_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Even
                 }
             }
 
-            P2pPhase::Idle => {}
+            P2pPhase::Idle => {
+                drop(s);
+                if punch_retry_due(shared) {
+                    let members = shared.members.lock().unwrap().clone();
+                    on_membership(shared, &members, on_event);
+                }
+            }
         }
     }
 }
@@ -942,24 +956,11 @@ fn encode_loop(
     let mut red_prev: Vec<u8> = Vec::new();
     let base_flags = if send_ch == 2 { flags::STEREO } else { 0 };
     let (mut seq, mut ts) = (0u16, 0u32);
-    let mut resuming = false;
 
     while !shared.stop.load(Ordering::Relaxed) {
         if in_cons.occupied_len() < need {
             std::thread::sleep(Duration::from_millis(1));
             continue;
-        }
-        if shared.paused.load(Ordering::Acquire) {
-            for _ in 0..need {
-                let _ = in_cons.try_pop();
-            }
-            resuming = true;
-            continue;
-        }
-        if resuming {
-            resuming = false;
-            seq = shared.seq.load(Ordering::Relaxed) as u16;
-            ts = shared.ts.load(Ordering::Relaxed);
         }
         let ring_us = (in_cons.occupied_len() as u64 * 1_000_000)
             / (SR as u64 * send_ch as u64);
@@ -978,7 +979,6 @@ fn encode_loop(
         let Some(dst) = *shared.route.dst.lock().unwrap() else {
             seq = seq.wrapping_add(1);
             ts = ts.wrapping_add(FRAME as u32);
-            publish_cursor(shared, seq, ts);
             continue;
         };
         for (i, &s) in pcm_f.iter().enumerate() {
@@ -1021,14 +1021,8 @@ fn encode_loop(
         }
         seq = seq.wrapping_add(1);
         ts = ts.wrapping_add(FRAME as u32);
-        publish_cursor(shared, seq, ts);
     }
     Ok(())
-}
-
-fn publish_cursor(shared: &Arc<Shared>, seq: u16, ts: u32) {
-    shared.seq.store(seq as u32, Ordering::Relaxed);
-    shared.ts.store(ts, Ordering::Relaxed);
 }
 
 fn playout_loop(
@@ -1053,12 +1047,6 @@ fn playout_loop(
     let (mut win_recovered, mut red_clean) = (0u64, 0u32);
 
     while !shared.stop.load(Ordering::Relaxed) {
-        if shared.paused.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(1));
-            last_stats = Instant::now();
-            continue;
-        }
-
         if master.occupied_len() >= out_target.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(1));
             continue;
@@ -1286,6 +1274,123 @@ fn playout_loop(
 mod tests {
     use super::*;
 
+    fn fresh_shared(session: SessionId) -> (Arc<Shared>, tokio::sync::mpsc::UnboundedReceiver<ClientMsg>) {
+        fresh_shared_seeded(session, None)
+    }
+
+    fn fresh_shared_seeded(
+        session: SessionId,
+        seed_peer: Option<SocketAddr>,
+    ) -> (Arc<Shared>, tokio::sync::mpsc::UnboundedReceiver<ClientMsg>) {
+        let (ctrl_tx, ctrl_rx) = unbounded_channel::<ClientMsg>();
+        let shared = Arc::new(Shared {
+            session: Mutex::new(Some(session)),
+            reflex: Mutex::new(None),
+            welcome_relay: Mutex::new(None),
+            inbox: Mutex::new(HashMap::new()),
+            p2p: Mutex::new(P2pState::new()),
+            route: MediaRoute { dst: Mutex::new(None), allowed: Mutex::new(HashSet::new()) },
+            members: Mutex::new(HashSet::new()),
+            seed_peer,
+            punch_attempts: AtomicU32::new(0),
+            retry_at: Mutex::new(None),
+            ctrl_tx: Mutex::new(Some(ctrl_tx)),
+            tx_pkts: AtomicU64::new(0),
+            mic_peak: AtomicU32::new(0),
+            dev_in_us: AtomicU32::new(0),
+            dev_out_us: AtomicU32::new(0),
+            ring_sum_us: AtomicU64::new(0),
+            ring_n: AtomicU64::new(0),
+            enc_sum_us: AtomicU64::new(0),
+            enc_n: AtomicU64::new(0),
+            peer_wants_red: AtomicBool::new(false),
+            want_red: AtomicBool::new(true),
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        (shared, ctrl_rx)
+    }
+
+    #[test]
+    fn a_seeded_peer_endpoint_joins_the_first_probe_wave() {
+        let hinted: SocketAddr = "203.0.113.7:51820".parse().unwrap();
+        let noop: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|_| {});
+
+        let (controller, _) = fresh_shared_seeded(1, Some(hinted));
+        on_membership(&controller, &HashSet::from([1u32, 2]), &noop);
+        assert!(
+            controller.p2p.lock().unwrap().cands.contains(&hinted),
+            "the controller armed without the seeded endpoint, so the first probe wave ignored the one address worth trying"
+        );
+
+        let (responder, mut rx) = fresh_shared_seeded(2, Some(hinted));
+        on_membership(&responder, &HashSet::from([1u32, 2]), &noop);
+        assert!(rx.try_recv().is_err(), "a seeded responder must not offer");
+        assert!(
+            responder.p2p.lock().unwrap().cands.contains(&hinted),
+            "the responder armed without the seeded endpoint"
+        );
+    }
+
+    #[test]
+    fn a_seed_that_fails_to_parse_is_no_candidate_at_all() {
+        assert_eq!(seed_addr(""), None);
+        assert_eq!(seed_addr("   "), None);
+        assert_eq!(seed_addr("not an address"), None);
+        assert_eq!(seed_addr("203.0.113.7"), None, "an ip without a port would panic later");
+        assert_eq!(
+            seed_addr(" 203.0.113.7:51820 "),
+            Some("203.0.113.7:51820".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_restarted_controller_reoffers_to_the_peer_waiting_in_the_room() {
+        let (shared, mut rx) = fresh_shared(1);
+        let noop: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|_| {});
+
+        on_membership(&shared, &HashSet::from([1u32, 2]), &noop);
+
+        let got = rx.try_recv().expect("the restarted controller never re-offered");
+        assert_eq!(
+            got,
+            ClientMsg::P2pOffer { to: 2, nonce: shared.p2p.lock().unwrap().local_nonce, cands: vec![] },
+            "the re-offer did not carry a fresh nonce for the waiting peer"
+        );
+        assert_eq!(shared.p2p.lock().unwrap().phase, P2pPhase::Punching);
+    }
+
+    #[test]
+    fn a_restarted_responder_arms_quietly_and_waits_for_the_offer() {
+        let (shared, mut rx) = fresh_shared(2);
+        let noop: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|_| {});
+
+        on_membership(&shared, &HashSet::from([1u32, 2]), &noop);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the restarted responder sent its own offer alongside the controller's"
+        );
+        let s = shared.p2p.lock().unwrap();
+        assert_eq!(
+            s.peer_session,
+            Some(1),
+            "the restarted responder did not latch the peer already in the room"
+        );
+        assert_ne!(s.local_nonce, 0, "without a fresh nonce the responder cannot answer an offer");
+        assert_eq!(s.phase, P2pPhase::Idle);
+    }
+
+    #[test]
+    fn repeat_punch_failures_wait_longer_but_never_over_a_minute() {
+        assert_eq!(punch_backoff(1), Duration::from_secs(5));
+        assert_eq!(punch_backoff(2), Duration::from_secs(10));
+        assert_eq!(punch_backoff(3), Duration::from_secs(20));
+        assert_eq!(punch_backoff(4), Duration::from_secs(40));
+        assert_eq!(punch_backoff(5), Duration::from_secs(60));
+        assert_eq!(punch_backoff(50), Duration::from_secs(60));
+        assert_eq!(punch_backoff(u32::MAX), Duration::from_secs(60));
+    }
+
     #[test]
     fn a_live_direct_call_outlasts_a_third_member_in_the_room() {
         assert!(
@@ -1310,7 +1415,7 @@ mod tests {
         assert!(carries_the_stream_forward(Some(65_535), 0), "the estimator stops at the seq wrap");
         assert!(
             !carries_the_stream_forward(Some(500), 500),
-            "a duplicate frame was measured, so the send overlap during a handover reads as jitter"
+            "a duplicated frame was measured, so its replay reads as jitter and inflates the buffer"
         );
         assert!(
             !carries_the_stream_forward(Some(500), 476),
