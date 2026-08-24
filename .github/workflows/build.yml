@@ -39,6 +39,44 @@ jobs:
           gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
           gh release upload dev-builds out/* --clobber
 
+  macos:
+    # This project owns no darwin hardware, so these builds are the only compile
+    # proof macOS gets. Both client targets ship to dev-builds; the rest of the
+    # workspace builds for compile coverage only (the relay deploys on Linux).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (native arm64)
+        run: cargo test --release
+
+      - name: Build workspace (Apple silicon)
+        run: cargo build --release --workspace --target aarch64-apple-darwin
+
+      - name: Build workspace (Intel)
+        run: cargo build --release --workspace --target x86_64-apple-darwin
+
+      # Releases, not upload-artifact: same Actions-quota reasoning as above.
+      - name: Stage binaries
+        shell: bash
+        run: |
+          mkdir -p out
+          cp target/aarch64-apple-darwin/release/star2 out/star2-macos-aarch64
+          cp target/x86_64-apple-darwin/release/star2 out/star2-macos-x64
+          ls -la out
+
+      - name: Publish to dev-builds release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view dev-builds >/dev/null 2>&1 ||             gh release create dev-builds --title "dev builds" --notes "latest CI binaries" --prerelease
+          gh release upload dev-builds out/* --clobber
+
   rendezvous:
     # The rendezvous server is pure Rust (no C deps), so it cross-compiles to the
     # aarch64 relay box straight from Linux.
