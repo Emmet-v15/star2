@@ -51,6 +51,13 @@ jobs:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
+      # audiopus_sys builds its vendored Opus with autotools on unix and never
+      # hears about cargo's target triple, so the toolchain comes from brew and
+      # the Intel leg is steered through clang -arch (Rosetta runs configure's
+      # test programs).
+      - name: Install Opus build prerequisites
+        run: brew install autoconf automake libtool
+
       - name: Test (native arm64)
         run: cargo test --release
 
@@ -58,6 +65,8 @@ jobs:
         run: cargo build --release --workspace --target aarch64-apple-darwin
 
       - name: Build workspace (Intel)
+        env:
+          CC: clang -arch x86_64
         run: cargo build --release --workspace --target x86_64-apple-darwin
 
       # Releases, not upload-artifact: same Actions-quota reasoning as above.
