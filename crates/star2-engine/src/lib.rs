@@ -65,17 +65,25 @@ const PKT_BUF: usize = 4096;
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 static RENDEZVOUS_DOWN: AtomicBool = AtomicBool::new(false);
 
+type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
+
+static LOG_SINK: Mutex<Option<EventSink>> = Mutex::new(None);
+
 pub fn set_verbose(on: bool) {
     VERBOSE.store(on, Ordering::Relaxed);
 }
 
-pub fn log_line(line: String) {
-    eprintln!("{line}");
+fn log_line(line: String) {
+    let sink = LOG_SINK.lock().unwrap().clone();
+    match sink {
+        Some(sink) => sink(Event::Log { line }),
+        None => eprintln!("{line}"),
+    }
 }
 
 fn debug_line(line: String) {
     if VERBOSE.load(Ordering::Relaxed) {
-        eprintln!("{line}");
+        log_line(line);
     }
 }
 
@@ -90,30 +98,22 @@ fn sharpen_timer() {}
 
 #[derive(Debug, Clone)]
 pub struct CallConfig {
-
     pub url: String,
     pub room_token: String,
     pub name: String,
     pub token: String,
-
     pub stereo: bool,
-
     pub bitrate: i32,
-
     pub input: String,
     pub output: String,
-
     pub dev_buf_ms: u32,
-
     pub seed_relay: String,
     pub seed_peer: String,
-
     pub build: String,
 }
 
 impl Default for CallConfig {
     fn default() -> Self {
-
         Self {
             url: "wss://star.v15.studio/star2".into(),
             room_token: "general".into(),
@@ -131,22 +131,32 @@ impl Default for CallConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
 pub enum Event {
-    Status(String),
-
+    Status { text: String },
     Direct { peer: SocketAddr, ms: u64 },
-
-    Ended(String),
-
-    Stats { jitter_ms: f64, target_ms: f64, loss_pct: f32, out_ms: f64, rx_pps: u64, play_fps: u64 },
+    Ended { why: String },
+    Stats {
+        jitter_ms: f64,
+        target_ms: f64,
+        loss_pct: f32,
+        out_ms: f64,
+        rx_pps: u64,
+        play_fps: u64,
+        tx_pps: u32,
+        mic_db: f32,
+        rtt_ms: f32,
+        path: String,
+    },
+    RoomJoined { room: String },
+    Log { line: String },
 }
 
 pub struct CallHandle {
     stop: Arc<AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
     shared: Arc<Shared>,
-
     _streams: (cpal::Stream, cpal::Stream),
 }
 
@@ -177,26 +187,18 @@ impl Drop for CallHandle {
 
 struct Shared {
     session: Mutex<Option<SessionId>>,
-
     reflex: Mutex<Option<String>>,
     welcome_relay: Mutex<Option<String>>,
     inbox: Mutex<HashMap<SessionId, SenderBuf>>,
     p2p: Mutex<P2pState>,
     route: MediaRoute,
-
     members: Mutex<HashSet<SessionId>>,
-
     seed_peer: Option<SocketAddr>,
-
     punch_attempts: AtomicU32,
     retry_at: Mutex<Option<Instant>>,
-
     ctrl_tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
-
     tx_pkts: AtomicU64,
-
     mic_peak: AtomicU32,
-
     dev_in_us: AtomicU32,
     dev_out_us: AtomicU32,
     ring_sum_us: AtomicU64,
@@ -225,7 +227,7 @@ fn abandon(
     }
     *shared.retry_at.lock().unwrap() = None;
     go_idle(shared, why);
-    on_event(Event::Status(format!("idle {why}")));
+    on_event(Event::Status { text: format!("idle {why}") });
 
     let members = shared.members.lock().unwrap().clone();
     on_membership(shared, &members, on_event);
@@ -253,10 +255,12 @@ fn punch_failed(
     } else {
         ""
     };
-    on_event(Event::Status(format!(
-        "punch failed ({attempt}) - retrying in {}s{verdict}",
-        wait.as_secs()
-    )));
+    on_event(Event::Status {
+        text: format!(
+            "punch failed ({attempt}) - retrying in {}s{verdict}",
+            wait.as_secs()
+        ),
+    });
 }
 
 fn punch_retry_due(shared: &Arc<Shared>) -> bool {
@@ -309,6 +313,7 @@ where
 {
     sharpen_timer();
     let on_event: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(on_event);
+    *LOG_SINK.lock().unwrap() = Some(on_event.clone());
     let stop = Arc::new(AtomicBool::new(false));
     let send_ch = if cfg.stereo { 2 } else { 1 };
 
@@ -399,7 +404,6 @@ where
                 let mut i = 0;
                 while i + in_ch <= data.len() {
                     if send_ch == 1 {
-
                         dm.push(data[i]);
                     } else {
                         dm.push(data[i]);
@@ -492,7 +496,7 @@ where
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
-                    on_event(Event::Ended(format!("runtime: {e}")));
+                    on_event(Event::Ended { why: format!("runtime: {e}") });
                     return;
                 }
             };
@@ -510,9 +514,9 @@ where
 
                 if !RENDEZVOUS_DOWN.swap(true, Ordering::Relaxed) {
                     if shared.p2p.lock().unwrap().phase == P2pPhase::Direct {
-                        on_event(Event::Status("rendezvous down, call unaffected".into()));
+                        on_event(Event::Status { text: "rendezvous down, call unaffected".into() });
                     } else {
-                        on_event(Event::Status(format!("rendezvous down: {e}")));
+                        on_event(Event::Status { text: format!("rendezvous down: {e}") });
                     }
                 }
                 std::thread::sleep(RENDEZVOUS_RETRY);
@@ -545,7 +549,7 @@ where
         let bitrate = cfg.bitrate;
         std::thread::Builder::new().name("encode".into()).spawn(move || {
             if let Err(e) = encode_loop(&shared, &sock, send_ch, bitrate, &mut in_cons) {
-                on_event(Event::Ended(format!("encoder: {e}")));
+                on_event(Event::Ended { why: format!("encoder: {e}") });
             }
         })?
     });
@@ -555,7 +559,7 @@ where
         let on_event = on_event.clone();
         std::thread::Builder::new().name("playout".into()).spawn(move || {
             if let Err(e) = playout_loop(&shared, &mut master_prod, &out_target, &out_fill, &underruns, &on_event) {
-                on_event(Event::Ended(format!("playout: {e}")));
+                on_event(Event::Ended { why: format!("playout: {e}") });
             }
         })?
     });
@@ -573,7 +577,7 @@ async fn control_loop(
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (ws, _) = tokio_tungstenite::connect_async(&cfg.url).await.context("connect")?;
     if RENDEZVOUS_DOWN.swap(false, Ordering::Relaxed) {
-        on_event(Event::Status("rendezvous up".into()));
+        on_event(Event::Status { text: "rendezvous up".into() });
     }
     let (mut tx_ws, mut rx_ws) = ws.split();
     let (tx, mut rx) = unbounded_channel::<ClientMsg>();
@@ -599,7 +603,6 @@ async fn control_loop(
             return Ok(());
         }
         tokio::select! {
-
             Some(m) = rx.recv() => {
                 tx_ws.send(tokio_tungstenite::tungstenite::Message::Text(
                     serde_json::to_string(&m)?.into(),
@@ -633,14 +636,15 @@ async fn control_loop(
                         joined = true;
                     }
                     ServerMsg::Room { members, .. } => {
-                        on_event(Event::Status(
-                            if members.len() < 2 { "wait" } else { "punch" }.into(),
-                        ));
+                        on_event(Event::Status {
+                            text: if members.len() < 2 { "wait" } else { "punch" }.into(),
+                        });
+                        on_event(Event::RoomJoined { room: cfg.room_token.clone() });
                         let ids: HashSet<SessionId> = members.iter().map(|m| m.session).collect();
                         on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::Joined { session, name } => {
-                        on_event(Event::Status(format!("peer {name}")));
+                        on_event(Event::Status { text: format!("peer {name}") });
 
                         let ids = {
                             let mut m = shared.members.lock().unwrap();
@@ -657,11 +661,10 @@ async fn control_loop(
                         };
 
                         if peer == Some(session) && phase == P2pPhase::Direct {
-                            on_event(Event::Status("peer left rendezvous, direct path up".into()));
+                            on_event(Event::Status { text: "peer left rendezvous, direct path up".into() });
                         } else if peer == Some(session) {
-
                             go_idle(&shared, "peer left");
-                            on_event(Event::Status("idle peer left".into()));
+                            on_event(Event::Status { text: "idle peer left".into() });
                         }
 
                         let ids = {
@@ -672,7 +675,6 @@ async fn control_loop(
                         on_membership(shared, &ids, on_event);
                     }
                     ServerMsg::P2pOffer { from, nonce, cands } => {
-
                         let in_room = {
                             let m = shared.members.lock().unwrap();
                             m.len() == 2 && m.contains(&from)
@@ -721,9 +723,8 @@ async fn control_loop(
                     }
                     ServerMsg::P2pAbort { from } => {
                         if shared.p2p.lock().unwrap().peer_session == Some(from) {
-
                             go_idle(&shared, "peer aborted");
-                            on_event(Event::Status("idle peer aborted".into()));
+                            on_event(Event::Status { text: "idle peer aborted".into() });
                         }
                     }
                     ServerMsg::Error { msg } => bail!("server: {msg}"),
@@ -758,7 +759,6 @@ fn on_membership(
     members: &HashSet<SessionId>,
     on_event: &Arc<dyn Fn(Event) + Send + Sync>,
 ) {
-
     *shared.members.lock().unwrap() = members.clone();
     let me = shared.my_session();
     if members.len() == 2 && members.contains(&me) {
@@ -797,7 +797,9 @@ fn on_membership(
         }
         drop(s);
         go_idle(shared, "room has more than 2 members");
-        on_event(Event::Status(format!("idle room has {} members, 1:1 only", members.len())));
+        on_event(Event::Status {
+            text: format!("idle room has {} members, 1:1 only", members.len()),
+        });
     }
 }
 
@@ -831,7 +833,6 @@ fn recv_loop(shared: &Arc<Shared>, sock: &UdpSocket, on_event: &Arc<dyn Fn(Event
         }
 
         if header.is_punch() {
-
             if let Some((peer, ms)) =
                 handle_punch(shared.my_session(), &shared.p2p, &shared.route, sock, src, header.session, payload)
             {
@@ -1106,7 +1107,6 @@ fn playout_loop(
         };
 
         if matches!(outcome, Playout::Idle) {
-
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
@@ -1170,7 +1170,6 @@ fn playout_loop(
             );
             let inbox = shared.inbox.lock().unwrap();
             if let Some(sb) = inbox.get(&sess) {
-
                 let played = sb.played - win_played;
                 let concealed = sb.concealed - win_concealed;
                 let rx = sb.recv_count - win_recv;
@@ -1183,6 +1182,11 @@ fn playout_loop(
                     out_fill.load(Ordering::Relaxed) as f64 / STEREO_FRAME as f64 * FRAME_MS as f64;
                 let rx_pps = (rx as f64 / secs).round() as u64;
                 let play_fps = (played as f64 / secs).round() as u64;
+                let path = match shared.p2p.lock().unwrap().phase {
+                    P2pPhase::Direct => "direct",
+                    P2pPhase::Punching => "punching",
+                    P2pPhase::Idle => "idle",
+                };
                 on_event(Event::Stats {
                     jitter_ms: sb.est.mean_abs,
                     target_ms: buf_ms,
@@ -1190,13 +1194,12 @@ fn playout_loop(
                     out_ms,
                     rx_pps,
                     play_fps,
+                    tx_pps,
+                    mic_db,
+                    rtt_ms,
+                    path: path.into(),
                 });
 
-                let path = match shared.p2p.lock().unwrap().phase {
-                    P2pPhase::Direct => "direct",
-                    P2pPhase::Punching => "punching",
-                    P2pPhase::Idle => "idle",
-                };
                 let late = dec.late_dropped - win_late;
                 let resyncs = dec.resyncs - win_resync;
                 let expands = sb.expanded - win_expand;
@@ -1235,13 +1238,24 @@ fn playout_loop(
                     path: path.into(),
                 });
             } else {
-
                 drop(inbox);
                 let path = match shared.p2p.lock().unwrap().phase {
                     P2pPhase::Direct => "direct",
                     P2pPhase::Punching => "punching",
                     P2pPhase::Idle => "idle",
                 };
+                on_event(Event::Stats {
+                    jitter_ms: 0.0,
+                    target_ms: 0.0,
+                    loss_pct: 0.0,
+                    out_ms: 0.0,
+                    rx_pps: 0,
+                    play_fps: 0,
+                    tx_pps,
+                    mic_db,
+                    rtt_ms,
+                    path: path.into(),
+                });
                 shared.send_ctrl(ClientMsg::Stats {
                     loss_pct: 0.0,
                     jitter_ms: 0.0,

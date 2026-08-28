@@ -1,0 +1,300 @@
+mod updater;
+
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use star2_engine::{start_call, CallConfig, CallHandle, Event};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const MANIFEST_URL: &str = "https://v15.studio/star2.json";
+const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
+const SEED_MAX_AGE_SECS: u64 = 120;
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct SeedFile {
+    room: String,
+    ts: u64,
+    relay: String,
+    peer: String,
+}
+
+fn seed_path(me: &Path) -> PathBuf {
+    me.with_extension("restart-seed.json")
+}
+
+fn write_restart_seed(me: &Path, room: &str, route: Option<(std::net::SocketAddr, String)>) {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else { return };
+    let seed = SeedFile {
+        room: room.to_string(),
+        ts: now.as_secs(),
+        relay: route.as_ref().map(|(_, r)| r.clone()).unwrap_or_default(),
+        peer: route.map(|(p, _)| p.to_string()).unwrap_or_default(),
+    };
+    let Ok(json) = serde_json::to_string(&seed) else { return };
+    let tmp = me.with_extension("restart-seed.tmp");
+    if std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, seed_path(me))).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn load_restart_seed(me: &Path) -> Option<SeedFile> {
+    let path = seed_path(me);
+    let txt = std::fs::read_to_string(&path).ok()?;
+    let seed: SeedFile = match serde_json::from_str(&txt) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) if now.as_secs().saturating_sub(seed.ts) <= SEED_MAX_AGE_SECS => Some(seed),
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            None
+        }
+    }
+}
+
+fn pc_name() -> Option<String> {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    let name = raw.trim().trim_end_matches('.');
+    let name = name.strip_suffix(".local").unwrap_or(name);
+    let name = name.split('.').next().unwrap_or(name).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn emit_status(app: &AppHandle, text: String) {
+    let _ = app.emit("engine", Event::Status { text });
+}
+
+enum CallMsg {
+    Join { room: String, seed_relay: String, seed_peer: String, reply: SyncSender<Result<String, String>> },
+    Leave { reply: Sender<()> },
+    Shutdown { reply: Sender<(Option<String>, Option<(std::net::SocketAddr, String)>)> },
+}
+
+struct App {
+    me: PathBuf,
+    call_tx: Sender<CallMsg>,
+}
+
+fn spawn_call_owner(app: AppHandle) -> Sender<CallMsg> {
+    let (tx, rx) = channel::<CallMsg>();
+    std::thread::Builder::new()
+        .name("call".into())
+        .spawn(move || own_calls(app, rx))
+        .expect("spawn the call owner");
+    tx
+}
+
+fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
+    let mut call: Option<CallHandle> = None;
+    let mut room: Option<String> = None;
+    for msg in rx {
+        match msg {
+            CallMsg::Join { room: requested, seed_relay, seed_peer, reply } => {
+                if call.is_some() {
+                    let _ = reply.send(Err("already in a call".into()));
+                    continue;
+                }
+                let mut cfg = CallConfig::default();
+                cfg.name = pc_name().unwrap_or_else(|| "anon".into());
+                cfg.url = env_or("STAR2_URL", &cfg.url);
+                cfg.input = env_or("STAR2_INPUT", "");
+                cfg.output = env_or("STAR2_OUTPUT", "");
+                cfg.seed_relay = seed_relay;
+                cfg.seed_peer = seed_peer;
+
+                let (token, minted) = match star2_proto::is_room_token(&requested) {
+                    true => (requested.clone(), false),
+                    false => (star2_proto::new_room_token(&requested), true),
+                };
+                cfg.room_token = token.clone();
+
+                let emitter = app.clone();
+                match start_call(cfg, move |e| {
+                    let _ = emitter.emit("engine", e);
+                }) {
+                    Ok(handle) => {
+                        call = Some(handle);
+                        room = Some(token.clone());
+                        if minted {
+                            let _ = app.emit(
+                                "engine",
+                                Event::Status { text: format!("{token}  (share it)") },
+                            );
+                        }
+                        let _ = reply.send(Ok(token));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("{e:#}")));
+                    }
+                }
+            }
+            CallMsg::Leave { reply } => {
+                if let Some(h) = call.take() {
+                    h.stop();
+                }
+                room = None;
+                let _ = reply.send(());
+            }
+            CallMsg::Shutdown { reply } => {
+                let route = call.as_ref().and_then(CallHandle::last_route);
+                if let Some(h) = call.take() {
+                    h.stop();
+                }
+                let _ = reply.send((room.take(), route));
+            }
+        }
+    }
+}
+
+fn request_join(state: &App, room: &str, seed_relay: String, seed_peer: String) -> Result<String, String> {
+    let (reply_tx, reply_rx) = sync_channel(1);
+    state
+        .call_tx
+        .send(CallMsg::Join { room: room.to_string(), seed_relay, seed_peer, reply: reply_tx })
+        .map_err(|_| "call thread gone".to_string())?;
+    reply_rx.recv().map_err(|_| "call thread gone".to_string())?
+}
+
+#[tauri::command]
+fn join(state: State<App>, room: String) -> Result<String, String> {
+    request_join(&state, room.trim(), String::new(), String::new())
+}
+
+#[tauri::command]
+fn leave(state: State<App>) -> Result<(), String> {
+    let (reply_tx, reply_rx) = channel();
+    state.call_tx.send(CallMsg::Leave { reply: reply_tx }).map_err(|_| "call thread gone")?;
+    reply_rx.recv().map_err(|_| "call thread gone")?;
+    Ok(())
+}
+
+#[tauri::command]
+fn display_name() -> String {
+    pc_name().unwrap_or_else(|| "anon".into())
+}
+
+fn restart_into_update(app: &AppHandle) -> ! {
+    let state = app.state::<App>();
+    let (reply_tx, reply_rx) = channel();
+    if let Err(why) = state.call_tx.send(CallMsg::Shutdown { reply: reply_tx }) {
+        eprintln!("shutdown send failed: {why}");
+    }
+    let (room, route) = reply_rx.recv().unwrap_or((None, None));
+    if let Some(room) = room.as_deref() {
+        write_restart_seed(&state.me, room, route);
+    }
+    app.restart()
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn spawn_upkeep(app: AppHandle) {
+    std::thread::spawn(move || {
+        let state = app.state::<App>();
+        let me = state.me.clone();
+        let manifest_url = env_or("STAR2_MANIFEST_URL", MANIFEST_URL);
+        let updates_ws = env_or("STAR2_UPDATES_WS", UPDATES_WS);
+
+        match updater::check_at_startup(&me, &manifest_url) {
+            updater::Outcome::Installed { version } => {
+                emit_status(&app, format!("update {version} installed - restarting"));
+                restart_into_update(&app);
+            }
+            updater::Outcome::Failed { why } => emit_status(&app, format!("update unavailable: {why}")),
+            updater::Outcome::Current => {}
+        }
+
+        if let Some(seed) = load_restart_seed(&me) {
+            let _ = std::fs::remove_file(seed_path(&me));
+            let _ = request_join(&state, &seed.room, seed.relay, seed.peer);
+        }
+
+        loop {
+            let swapped = updater::block_on(updater::watch_session(
+                &me,
+                &updates_ws,
+                &manifest_url,
+                env!("CARGO_PKG_VERSION"),
+            ));
+            if matches!(swapped, Ok(true)) {
+                restart_into_update(&app);
+            }
+            std::thread::sleep(updater::reconnect_delay());
+        }
+    });
+}
+
+fn main() {
+    if std::env::var("STAR2_URL").is_ok() {
+        star2_engine::set_verbose(true);
+    }
+    let me = std::env::current_exe().expect("locate the running binary");
+    tauri::Builder::default()
+        .setup(|app| {
+            let call_tx = spawn_call_owner(app.handle().clone());
+            app.manage(App { me, call_tx });
+            spawn_upkeep(app.handle().clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![join, leave, display_name])
+        .run(tauri::generate_context!())
+        .expect("error while running star2");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_me(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("star2-app-{tag}-{}.exe", std::process::id()))
+    }
+
+    #[test]
+    fn a_fresh_seed_carries_the_room_and_the_route() {
+        let me = temp_me("fresh");
+        let _ = std::fs::remove_file(seed_path(&me));
+
+        write_restart_seed(
+            &me,
+            "general",
+            Some(("203.0.113.7:51820".parse().unwrap(), "empire:40001".into())),
+        );
+        let s = load_restart_seed(&me).expect("a just-written seed must validate");
+        assert_eq!(s.room, "general", "the successor must know which room to rejoin");
+        assert_eq!(
+            s.peer, "203.0.113.7:51820",
+            "the peer endpoint is the whole point of the seed"
+        );
+        assert_eq!(s.relay, "empire:40001");
+        assert!(seed_path(&me).exists(), "loading must not consume a valid seed");
+
+        let _ = std::fs::remove_file(seed_path(&me));
+    }
+
+    #[test]
+    fn an_expired_or_broken_seed_is_discarded_silently() {
+        let me = temp_me("stale");
+        let _ = std::fs::remove_file(seed_path(&me));
+
+        assert_eq!(load_restart_seed(&me), None, "no seed file means no seed");
+
+        let ancient = SeedFile { room: "x".into(), ts: 0, relay: String::new(), peer: String::new() };
+        std::fs::write(seed_path(&me), serde_json::to_string(&ancient).unwrap()).unwrap();
+        assert_eq!(load_restart_seed(&me), None, "ts=0 is ancient history");
+        assert!(!seed_path(&me).exists(), "a rejected seed must not linger");
+
+        std::fs::write(seed_path(&me), "{not json").unwrap();
+        assert_eq!(load_restart_seed(&me), None, "a broken seed is not a crash");
+        assert!(!seed_path(&me).exists());
+
+        let _ = std::fs::remove_file(seed_path(&me));
+    }
+}

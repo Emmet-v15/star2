@@ -41,7 +41,6 @@ struct App {
 }
 
 impl App {
-
     fn send(hub: &Hub, to: SessionId, msg: ServerMsg) {
         if let Some(s) = hub.sessions.get(&to) {
             let _ = s.tx.send(msg);
@@ -216,7 +215,6 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
 
     let mut id: Option<SessionId> = None;
     loop {
-
         let Ok(next) = tokio::time::timeout(DEAD_AFTER, inc.next()).await else {
             match id {
                 Some(me) => eprintln!("[rendezvous] session {me} timed out"),
@@ -295,8 +293,6 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
                 .unwrap_or_default();
             App::send(&hub, me, ServerMsg::Room { room, members });
         }
-        ClientMsg::Leave => App::leave_room(&mut hub, me),
-
         ClientMsg::Stats {
             loss_pct,
             jitter_ms,
@@ -423,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_tells_the_peer_who_stayed() {
+    fn a_dropping_peer_tells_the_one_who_stayed() {
         let app = app();
         let (a, mut ra) = connect(&app, "a");
         let (b, _rb) = connect(&app, "b");
@@ -431,7 +427,10 @@ mod tests {
         handle(&app, b, ClientMsg::Join { room: "one".into() });
         drain(&mut ra);
 
-        handle(&app, b, ClientMsg::Leave);
+        let mut hub = app.hub.lock().unwrap();
+        App::leave_room(&mut hub, b);
+        hub.sessions.remove(&b);
+        drop(hub);
         assert_eq!(
             drain(&mut ra),
             vec![ServerMsg::Left { session: b }],

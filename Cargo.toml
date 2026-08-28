@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/star2-proto", "crates/star2-rendezvous", "crates/star2-engine", "crates/star2-cli"]
+members = ["crates/star2-proto", "crates/star2-rendezvous", "crates/star2-engine", "crates/star2-app"]
 
 [workspace.package]
 edition = "2021"
-version = "0.3.45"
+version = "0.4.5"
 license = "MIT"
 
 [workspace.dependencies]

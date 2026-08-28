@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 mod room;
-pub use room::{is_room_token, new_room_token, room_label, slugify};
+pub use room::{is_room_token, new_room_token, room_label};
 
 pub const PROTO_VERSION: u8 = 1;
 
@@ -10,7 +10,6 @@ pub const MEDIA_HEADER_LEN: usize = 12;
 pub type SessionId = u32;
 
 pub mod flags {
-
     pub const REFLEX: u8 = 0b0000_0001;
 
     pub const RED_WANTED: u8 = 0b0000_0010;
@@ -27,12 +26,9 @@ pub mod flags {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ClientMsg {
-
     Hello { name: String, ver: u32, token: String, #[serde(default)] build: String },
 
     Join { room: String },
-
-    Leave,
 
     Stats {
         loss_pct: f32,
@@ -41,17 +37,11 @@ pub enum ClientMsg {
         out_ms: u32,
         rx_pps: u32,
         play_fps: u32,
-
         late_pps: u32,
-
         resyncs: u32,
-
         expand_pps: u32,
-
         tx_pps: u32,
-
         mic_db: f32,
-
         #[serde(default)]
         dev_in_ms: f32,
         #[serde(default)]
@@ -69,7 +59,6 @@ pub enum ClientMsg {
         #[serde(default)]
         rx_path_ms: f32,
         #[serde(default)]
-
         path: String,
     },
 
@@ -85,7 +74,6 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum ServerMsg {
-
     Welcome { session: SessionId, reflex: String },
 
     Room { room: String, members: Vec<Member> },
@@ -112,16 +100,12 @@ pub struct Member {
 pub struct MediaHeader {
     pub version: u8,
     pub flags: u8,
-
     pub session: SessionId,
-
     pub seq: u16,
-
     pub timestamp: u32,
 }
 
 impl MediaHeader {
-
     pub fn new(session: SessionId, seq: u16, timestamp: u32, flags: u8) -> Self {
         Self { version: PROTO_VERSION, flags, session, seq, timestamp }
     }
@@ -197,7 +181,6 @@ pub struct PunchProbe {
 }
 
 impl PunchProbe {
-
     pub fn encode(&self, buf: &mut [u8]) {
         assert!(buf.len() >= PUNCH_HDR_LEN, "buffer too small for punch probe");
         buf[0..4].copy_from_slice(&PUNCH_MAGIC);
