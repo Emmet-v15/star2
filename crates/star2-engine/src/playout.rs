@@ -18,7 +18,6 @@ pub(crate) struct AudioPkt {
 }
 
 pub(crate) enum Playout {
-
     Idle,
 
     Rendered,
@@ -33,18 +32,13 @@ pub(crate) struct DecState {
     pub(crate) dec_ch: usize,
     pub(crate) next: Option<u16>,
     pub(crate) started: bool,
-
     pub(crate) dead: u32,
     pub(crate) jb_sum_us: u64,
     pub(crate) jb_n: u64,
     pub(crate) dead_recv: u64,
-
     pub(crate) late_dropped: u64,
-
     pub(crate) resyncs: u64,
-
     pub(crate) stalled: u32,
-
     pub(crate) recovered: u64,
 }
 
@@ -128,7 +122,6 @@ impl DecState {
         scratch: &mut [i16],
     ) -> Playout {
         if !self.started {
-
             if pkts.is_empty() || pkts.len() < target {
                 out.iter_mut().for_each(|x| *x = 0.0);
                 return Playout::Idle;
@@ -169,7 +162,6 @@ impl DecState {
                         Playout::Rendered
                     }
                     None if pkts.len() < target && self.stalled < target.max(1) as u32 => {
-
                         self.stalled += 1;
                         self.plc(out, scratch);
                         return Playout::Expanded;
@@ -199,23 +191,18 @@ pub(crate) struct DelayEstimator {
     pub(crate) bins: [f32; JB_BINS],
     pub(crate) total: f32,
     pub(crate) since_decay: u32,
-
     pub(crate) mean_abs: f64,
-
     pub(crate) spike_ms: f64,
 }
 
 impl Default for DelayEstimator {
     fn default() -> Self {
-
         Self { bins: [0.0; JB_BINS], total: 0.0, since_decay: 0, mean_abs: 0.0, spike_ms: 0.0 }
     }
 }
 
 impl DelayEstimator {
-
     pub(crate) fn observe(&mut self, d: f64) {
-
         if self.mean_abs > 0.5 && d > SPIKE_MULT * self.mean_abs {
             self.spike_ms = self.spike_ms.max(d.min(SPIKE_MAX_MS));
         }
@@ -267,16 +254,12 @@ pub(crate) struct SenderBuf {
 
     pub(crate) recv_count: u64,
     pub(crate) played: u64,
-
     pub(crate) concealed: u64,
-
     pub(crate) expanded: u64,
-
     pub(crate) target_frames: usize,
 }
 
 impl SenderBuf {
-
     pub(crate) fn insert_capped(&mut self, seq: u16, pkt: AudioPkt) {
         if self.pkts.len() >= 256 {
             if let Some(&oldest) = self.pkts.keys().reduce(|a, b| if seq_lt(*a, *b) { a } else { b }) {
@@ -289,7 +272,6 @@ impl SenderBuf {
 
 #[cfg(test)]
 mod audio_fidelity {
-
     use super::*;
     use audiopus::coder::Encoder;
     use audiopus::{Application, Bitrate};

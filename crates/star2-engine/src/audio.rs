@@ -56,7 +56,6 @@ pub(crate) fn buffer_size_for(supported: &cpal::SupportedBufferSize, ms: u32) ->
 pub(crate) struct Resampler {
     ratio: f64,
     pos: f64,
-
     last: Vec<f32>,
     ch: usize,
 }
@@ -80,7 +79,6 @@ impl Resampler {
                 let b = if (i + 1) < frames as isize {
                     src[(i + 1) as usize * self.ch + c]
                 } else {
-
                     a
                 };
                 out.push(a + (b - a) * frac);

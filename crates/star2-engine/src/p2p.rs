@@ -17,7 +17,6 @@ pub(crate) struct MediaRoute {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum P2pPhase {
-
     Idle,
     Punching,
     Direct,
@@ -25,21 +24,13 @@ pub(crate) enum P2pPhase {
 
 pub(crate) struct P2pState {
     pub(crate) phase: P2pPhase,
-
     pub(crate) peer_session: Option<SessionId>,
-
     pub(crate) local_nonce: u64,
-
     pub(crate) remote_nonce: Option<u64>,
-
     pub(crate) cands: Vec<SocketAddr>,
-
     pub(crate) my_cands: Vec<String>,
-
     pub(crate) my_txids: VecDeque<(u64, Instant)>,
-
     pub(crate) started: Instant,
-
     pub(crate) last_peer_rx: Instant,
     pub(crate) rtt_us: Option<u64>,
 }
@@ -127,7 +118,6 @@ pub(crate) fn handle_punch(
     s.last_peer_rx = Instant::now();
     match pr.kind {
         PUNCH_PROBE => {
-
             s.merge_cand(src);
 
             let rn = s.remote_nonce?;
