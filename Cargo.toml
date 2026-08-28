@@ -17,6 +17,8 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 star2-proto = { path = "crates/star2-proto" }
+star-proto = { path = "../star-libs/crates/star-proto" }
+star-voice = { path = "../star-libs/crates/star-voice" }
 
 # The rendezvous server runs on a small loaded aarch64 box: optimize for size.
 [profile.release]

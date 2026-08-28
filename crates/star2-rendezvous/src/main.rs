@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use star2_proto::{flags, ClientMsg, MediaHeader, Member, ServerMsg, SessionId, MEDIA_HEADER_LEN};
+use star_proto::{flags, ClientMsg, MediaHeader, Member, ServerMsg, SessionId, MEDIA_HEADER_LEN};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -229,8 +229,8 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         let Some(me) = id else {
             match cm {
                 ClientMsg::Hello { name, ver, token, build } => {
-                    if ver != star2_proto::PROTO_VERSION as u32 {
-                        let _ = tx.send(ServerMsg::Error { msg: format!("proto {ver} != {}", star2_proto::PROTO_VERSION) });
+                    if ver != star_proto::PROTO_VERSION as u32 {
+                        let _ = tx.send(ServerMsg::Error { msg: format!("proto {ver} != {}", star_proto::PROTO_VERSION) });
                         break;
                     }
                     if token != app.token {

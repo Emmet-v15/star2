@@ -5,11 +5,13 @@ use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use star2_engine::{start_call, CallConfig, CallHandle, Event};
+use star_voice::{start_call, CallConfig, CallHandle, Event};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MANIFEST_URL: &str = "https://v15.studio/star2.json";
 const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
+const RENDEZVOUS_URL: &str = "wss://star.v15.studio/star2";
+const RENDEZVOUS_TOKEN: &str = "ad7afaabdfe6a6636c3e3e478321039c";
 const SEED_MAX_AGE_SECS: u64 = 120;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -102,15 +104,16 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                 }
                 let mut cfg = CallConfig::default();
                 cfg.name = pc_name().unwrap_or_else(|| "anon".into());
-                cfg.url = env_or("STAR2_URL", &cfg.url);
+                cfg.url = env_or("STAR2_URL", RENDEZVOUS_URL);
+                cfg.token = RENDEZVOUS_TOKEN.into();
                 cfg.input = env_or("STAR2_INPUT", "");
                 cfg.output = env_or("STAR2_OUTPUT", "");
                 cfg.seed_relay = seed_relay;
                 cfg.seed_peer = seed_peer;
 
-                let (token, minted) = match star2_proto::is_room_token(&requested) {
+                let (token, minted) = match star_proto::is_room_token(&requested) {
                     true => (requested.clone(), false),
-                    false => (star2_proto::new_room_token(&requested), true),
+                    false => (star_proto::new_room_token(&requested), true),
                 };
                 cfg.room_token = token.clone();
 
@@ -234,7 +237,7 @@ fn spawn_upkeep(app: AppHandle) {
 
 fn main() {
     if std::env::var("STAR2_URL").is_ok() {
-        star2_engine::set_verbose(true);
+        star_voice::set_verbose(true);
     }
     let me = std::env::current_exe().expect("locate the running binary");
     tauri::Builder::default()

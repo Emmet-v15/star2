@@ -9,7 +9,7 @@ name = "star2-rendezvous"
 path = "src/main.rs"
 
 [dependencies]
-star2-proto = { workspace = true }
+star-proto = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

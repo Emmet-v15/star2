@@ -12,8 +12,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-star2-engine = { path = "../star2-engine" }
-star2-proto = { workspace = true }
+star-voice = { workspace = true }
+star-proto = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
