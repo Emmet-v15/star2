@@ -47,7 +47,12 @@ merged version is slightly worse at the edges.
 - **Must not depend on the rendezvous server being up.** A call already in
   progress survives the rendezvous server going away.
 - **Minimal window, terminal restraint.** One Tauri window: room token, join,
-  status. Nothing gets a button until it earns one.
+  status, and the two device pickers — which earned their place by being the
+  only way to tell a broken call from a wrongly-routed one. Nothing else gets a
+  button until it earns one the same way.
+- **The window shows state; the file holds history.** Diagnostics go to
+  `star2.log` beside the binary, never to a pane. A log the user has to keep a
+  window open to read is a log that is missing when it is needed.
 - Windows is the target. macOS and Android are out of scope until there is a
   plan that does not cost more than the feature is worth.
 
