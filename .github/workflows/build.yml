@@ -8,31 +8,51 @@ on:
 permissions:
   contents: write
 
+# star2's crates are path dependencies on ../star-libs, so every job checks out
+# both repositories side by side and runs cargo from inside star2. star-libs is
+# private; STAR_LIBS_SSH_KEY is the private half of a read-only deploy key
+# registered on it, which is why no PAT is involved.
 jobs:
   client:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: star2
+      - uses: actions/checkout@v4
+        with:
+          repository: Emmet-v15/star-libs
+          path: star-libs
+          ssh-key: ${{ secrets.STAR_LIBS_SSH_KEY }}
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: star2
 
       - name: Build client
+        working-directory: star2
         run: cargo build --release -p star2-app
 
       - name: Test
+        working-directory: star2
         run: cargo test --release
 
       # Releases, not upload-artifact: Actions artifact storage is quota-limited
       # on a private repo and uploads fail there long before the build does.
       - name: Stage binary
         shell: bash
+        working-directory: star2
         run: |
           mkdir -p out
           cp target/release/star2.exe out/star2-windows-x64.exe
           ls -la out
 
+      # gh reads the repository from the git remote in the working directory, so
+      # this has to run inside star2 or it would target star-libs.
       - name: Publish to dev-builds release
         shell: bash
+        working-directory: star2
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -45,13 +65,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: star2
+      - uses: actions/checkout@v4
+        with:
+          repository: Emmet-v15/star-libs
+          path: star-libs
+          ssh-key: ${{ secrets.STAR_LIBS_SSH_KEY }}
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: star2
       - run: rustup target add aarch64-unknown-linux-gnu
       - run: cargo install cargo-zigbuild
       - uses: goto-bus-stop/setup-zig@v2
-      - run: cargo zigbuild -p star2-rendezvous --release --target aarch64-unknown-linux-gnu.2.34
+      - working-directory: star2
+        run: cargo zigbuild -p star2-rendezvous --release --target aarch64-unknown-linux-gnu.2.34
       - name: Publish rendezvous to dev-builds release
+        working-directory: star2
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
