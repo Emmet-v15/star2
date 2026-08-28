@@ -40,7 +40,7 @@ merged version is slightly worse at the edges.
 ## 4. Scope
 
 - P2P voice, 1:1, low latency. That is the product.
-- **Automatic self-update is a headline feature, not plumbing.** See §8.
+- **Automatic self-update is a headline feature, not plumbing.** See §9.
 - **Rendezvous only** — the rendezvous server brokers the hole punch and answers
   reflexive probes. Media never passes through it and **never falls back through
   it.** A failed punch ends the call.
@@ -51,7 +51,32 @@ merged version is slightly worse at the edges.
 - Windows is the target. macOS and Android are out of scope until there is a
   plan that does not cost more than the feature is worth.
 
-## 5. Audio
+## 5. This repository is the application. The libraries live next door.
+
+The wire format and the client core were extracted to **`../star-libs`**, a
+sibling checkout, as `star-proto` and `star-voice`. They are path dependencies.
+Clone star-libs beside star2 or nothing builds.
+
+What is left here is what is specific to this deployment: the rendezvous server,
+the Tauri window, self-update, and the addresses that belong to this install
+(`RENDEZVOUS_URL`, `RENDEZVOUS_TOKEN`, `MANIFEST_URL`, `UPDATES_WS` — all in
+`crates/star2-app/src/main.rs`).
+
+So: **a change to how a call works is a change in star-libs, not here.** Opus,
+the jitter buffer, the punch FSM, the resampler and the media header are all
+over there. If you are editing this repo to fix a call, you are in the wrong
+repo.
+
+Two rules invert on the other side of that boundary, and star-libs' own
+`CLAUDE.md` records why: public items there carry doc comments (§6 below does
+not apply to a library read through `cargo doc`), and `star-screen` puts its one
+capture backend behind a trait (§1 does not apply when the alternative is that
+non-Windows targets stop compiling).
+
+star v1's history is the `legacy/star-v1` branch here. It is not an ancestor of
+`main` and must never be merged into it.
+
+## 6. Audio
 
 - 48 kHz, Opus, 5 ms frames. These are settled; do not re-litigate them.
 - Never deliberately corrupt the stream. Do not drop, splice, or discard a good
@@ -59,7 +84,7 @@ merged version is slightly worse at the edges.
   gap that is already there.
 - Default is mono 128 kbps. Stereo is opt-in.
 
-## 6. Code style
+## 7. Code style
 
 - **No comments in `.rs` files.** Name things so the comment is unnecessary. If
   a decision needs prose, it goes in a commit message or in this file.
@@ -67,17 +92,17 @@ merged version is slightly worse at the edges.
 - Tests assert on behaviour that a user would notice, and their failure messages
   say what broke.
 
-## 7. Build and release
+## 8. Build and release
 
 - Every build script lives in `deploy/`. There is no second place to look.
 - Every build is uploaded to v15.studio.
 - **Publishing is never gated on who is mid-call.** Ship the update; live peers
   take it without being asked - a mid-call client stops, swaps, relaunches, and
-  rejoins the same room (§8).
+  rejoins the same room (§9).
 - Never `taskkill //F //IM star2.exe //T` — it kills every peer's client too.
   Always target a PID.
 
-## 8. Updates are automatic, delivered by restart-and-rejoin
+## 9. Updates are automatic, delivered by restart-and-rejoin
 
 The rendezvous server says a new build exists; the client is running it moments
 later. No prompt, no restart the user has to perform. **The call does not survive
