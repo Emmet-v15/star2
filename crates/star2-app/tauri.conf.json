@@ -4,9 +4,9 @@
   "version": "0.4.5",
   "identifier": "studio.v15.star2",
   "build": {
-    "beforeDevCommand": "bun --cwd ui dev",
+    "beforeDevCommand": "bun --cwd crates/star2-app/ui dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "bun --cwd ui build",
+    "beforeBuildCommand": "bun --cwd crates/star2-app/ui build",
     "frontendDist": "../ui/dist"
   },
   "app": {
