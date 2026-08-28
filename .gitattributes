@@ -1,0 +1,18 @@
+# Line endings are decided here, not by whatever wrote the file last.
+#
+# Everything text is stored LF in the repository and checked out LF. Without
+# this, an editor or a script that rewrites a file with the platform separator
+# turns a two-line change into a whole-file rewrite, which is what happened to
+# crates/star-voice/src/lib.rs in star-libs.
+* text=auto eol=lf
+
+# Windows shells are the exception: cmd and PowerShell want CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touch these.
+*.ico binary
+*.png binary
+*.exe binary
+*.7z binary
