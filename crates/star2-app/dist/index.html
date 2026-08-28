@@ -59,10 +59,6 @@
   select:focus { outline:none; border-color:var(--accent); }
 
   #fatal { color:var(--bad); white-space:pre-wrap; user-select:text; }
-  details summary { cursor:pointer; color:var(--dim); font-size:11px; letter-spacing:.5px; }
-  #log { margin-top:6px; max-height:150px; overflow-y:auto; background:#0e1013;
-         border:1px solid var(--line); border-radius:6px; padding:8px 10px;
-         font-size:11px; line-height:1.5; color:#7d85a8; white-space:pre-wrap; user-select:text; }
 </style>
 </head>
 <body>
@@ -90,10 +86,6 @@
       <label class="d"><span>OUT</span><select id="outDev"></select></label>
     </div>
     <div id="fatal"></div>
-    <details>
-      <summary>ENGINE LOG</summary>
-      <div id="log"></div>
-    </details>
   </div>
 
 <script>
@@ -229,13 +221,6 @@ $("leave").onclick = async () => {
   loadDevices();
 };
 
-function appendLog(line) {
-  const el = $("log");
-  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-  el.textContent += (el.textContent ? "\n" : "") + line;
-  if (atBottom) el.scrollTop = el.scrollHeight;
-}
-
 if (T && T.event) {
   listen("engine", (ev) => {
     const m = ev.payload;
@@ -261,9 +246,6 @@ if (T && T.event) {
       case "stats":
         stats = m;
         renderStats(m);
-        break;
-      case "log":
-        appendLog(m.line);
         break;
     }
   });

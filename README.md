@@ -61,9 +61,15 @@ without a version bump in `Cargo.toml` and always POSTs the update nudge.
 ## Running
 
 Download `star2.exe` from v15.studio once and run it. Type a room token into the
-window and hit Join; leave it blank and you get a brand-new room to share. Your
-display name is the machine's name, audio uses the system devices at mono
-128 kbps.
+window and hit Join; leave it blank and you get a brand-new room to share. Pick
+your input and output devices from the two dropdowns — they default to the system
+devices and are remembered between runs. Your display name is the machine's name,
+audio is mono 128 kbps.
+
+The window shows status, not history. Everything the engine decides — device
+rates, candidates, punch timings, buffer moves — goes to `star2.log` beside the
+binary, appended across update restarts and dropped once it passes 4 MB. That is
+the file to read after something goes wrong.
 
 There is **one** binary and it updates itself. On startup — and again whenever the
 rendezvous server nudges it — it compares its own SHA-256 against the manifest, and if they
@@ -112,10 +118,10 @@ There is no crash supervisor. If star2 dies, you start it again.
 Both peers must join the same room token. The lower session id becomes the punch
 controller, so glare can't happen.
 
-The window exposes exactly one control today: the room token. Devices are the
-system defaults, audio is mono 128 kbps at the baked-in rendezvous URL, and your
-display name is the machine's name. The engine still supports stereo, explicit
-devices, bitrate and buffer tuning; the knobs just have not been drawn yet.
+The window exposes two controls today: the room token and the input/output device
+pickers. Audio is mono 128 kbps at the baked-in rendezvous URL, and your display
+name is the machine's name. The engine still supports stereo, bitrate and buffer
+tuning; those knobs have not been drawn yet.
 
 ## Latency
 
@@ -199,8 +205,8 @@ Not yet verified:
   What it still never does is relay through the rendezvous server — if the punch
   cannot succeed, neither can the call.
 - 1:1 only — a third peer in a room ends the call rather than mixing.
-- The window has no stereo / device / bitrate / buffer controls yet; the engine
-  takes all of those, the UI just does not expose them.
+- The window has no stereo / bitrate / buffer controls yet; the engine takes all
+  of those, the UI just does not expose them.
 - No encryption of the media payload. The punch nonce is protected by the
   rendezvous TLS, so an off-path attacker cannot redirect media, but an on-path one
   can read audio.

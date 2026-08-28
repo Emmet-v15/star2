@@ -1,8 +1,11 @@
 mod updater;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use star_voice::{start_call, CallConfig, CallHandle, Event};
@@ -13,6 +16,35 @@ const UPDATES_WS: &str = "wss://star.v15.studio/star2/updates";
 const RENDEZVOUS_URL: &str = "wss://star.v15.studio/star2";
 const RENDEZVOUS_TOKEN: &str = "ad7afaabdfe6a6636c3e3e478321039c";
 const SEED_MAX_AGE_SECS: u64 = 120;
+const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+fn log_path(me: &Path) -> PathBuf {
+    me.with_extension("log")
+}
+
+fn open_log(me: &Path) {
+    let _ = STARTED.set(Instant::now());
+    let path = log_path(me);
+    if std::fs::metadata(&path).map(|m| m.len() > LOG_MAX_BYTES).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = LOG.set(Mutex::new(f));
+    }
+    log(&format!("--- star2 {} starting ---", env!("CARGO_PKG_VERSION")));
+}
+
+fn log(line: &str) {
+    let Some(lock) = LOG.get() else { return };
+    let t = STARTED.get().map(Instant::elapsed).unwrap_or_default();
+    let Ok(mut f) = lock.lock() else { return };
+    let (m, s, ms) = (t.as_secs() / 60, t.as_secs() % 60, t.subsec_millis());
+    let _ = writeln!(f, "{m:02}:{s:02}.{ms:03}  {line}");
+    let _ = f.flush();
+}
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct SeedFile {
@@ -76,6 +108,7 @@ fn pc_name() -> Option<String> {
 }
 
 fn emit_status(app: &AppHandle, text: String) {
+    log(&text);
     let _ = app.emit("engine", Event::Status { text });
 }
 
@@ -83,6 +116,13 @@ fn emit_status(app: &AppHandle, text: String) {
 struct Devices {
     input: String,
     output: String,
+}
+
+#[derive(Default)]
+struct Resume {
+    room: Option<String>,
+    devices: Devices,
+    route: Option<(std::net::SocketAddr, String)>,
 }
 
 enum CallMsg {
@@ -94,7 +134,7 @@ enum CallMsg {
         reply: SyncSender<Result<String, String>>,
     },
     Leave { reply: Sender<()> },
-    Shutdown { reply: Sender<(Option<String>, Devices, Option<(std::net::SocketAddr, String)>)> },
+    Shutdown { reply: Sender<Resume> },
 }
 
 struct App {
@@ -142,6 +182,14 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
 
                 let emitter = app.clone();
                 match start_call(cfg, move |e| {
+                    match &e {
+                        Event::Log { line } => return log(line),
+                        Event::Status { text } => log(text),
+                        Event::Direct { peer, ms } => log(&format!("direct {peer} in {ms} ms")),
+                        Event::RoomJoined { room } => log(&format!("joined {room}")),
+                        Event::Ended { why } => log(&format!("ended: {why}")),
+                        Event::Stats { .. } => {}
+                    }
                     let _ = emitter.emit("engine", e);
                 }) {
                     Ok(handle) => {
@@ -172,7 +220,8 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                 if let Some(h) = call.take() {
                     h.stop();
                 }
-                let _ = reply.send((room.take(), std::mem::take(&mut chosen), route));
+                let devices = std::mem::take(&mut chosen);
+                let _ = reply.send(Resume { room: room.take(), devices, route });
             }
         }
     }
@@ -237,9 +286,9 @@ fn restart_into_update(app: &AppHandle) -> ! {
     if let Err(why) = state.call_tx.send(CallMsg::Shutdown { reply: reply_tx }) {
         eprintln!("shutdown send failed: {why}");
     }
-    let (room, devices, route) = reply_rx.recv().unwrap_or_default();
-    if let Some(room) = room.as_deref() {
-        write_restart_seed(&state.me, room, devices, route);
+    let resume = reply_rx.recv().unwrap_or_default();
+    if let Some(room) = resume.room.as_deref() {
+        write_restart_seed(&state.me, room, resume.devices, resume.route);
     }
     app.restart()
 }
@@ -285,10 +334,9 @@ fn spawn_upkeep(app: AppHandle) {
 }
 
 fn main() {
-    if std::env::var("STAR2_URL").is_ok() {
-        star_voice::set_verbose(true);
-    }
     let me = std::env::current_exe().expect("locate the running binary");
+    open_log(&me);
+    star_voice::set_verbose(true);
     tauri::Builder::default()
         .setup(|app| {
             let call_tx = spawn_call_owner(app.handle().clone());
