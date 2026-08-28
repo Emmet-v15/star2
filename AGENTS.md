@@ -23,6 +23,14 @@ Strict. The backend contract types live in `src/lib/engine.svelte.ts` and mirror
 the Rust commands in `crates/star2-app/src/main.rs` — when Rust changes, change
 them in the same commit. Do not invent commands that `main.rs` does not register.
 
+## Dev loop
+
+`cargo tauri dev` from `crates/star2-app` runs the whole chain: the Tauri CLI
+detects `ui/package.json` and executes `beforeDevCommand` **with cwd already set
+to `ui/`** — so these must be plain `bun run dev` / `bun run build`, never paths
+with `--cwd`. Vite binds `:5173` strict; a stray dev server on that port fails
+the chain.
+
 ## Scope of the window
 
 `CLAUDE.md` §4 is the spec: room token, join, status, two device pickers. A new

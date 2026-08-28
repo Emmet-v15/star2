@@ -4,10 +4,10 @@
   "version": "0.4.5",
   "identifier": "studio.v15.star2",
   "build": {
-    "beforeDevCommand": "bun --cwd crates/star2-app/ui dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "bun --cwd crates/star2-app/ui build",
-    "frontendDist": "../ui/dist"
+    "frontendDist": "../ui/dist",
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build"
   },
   "app": {
     "withGlobalTauri": false,
@@ -26,6 +26,8 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.ico"]
+    "icon": [
+      "icons/icon.ico"
+    ]
   }
 }
