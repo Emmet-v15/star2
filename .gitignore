@@ -4,3 +4,4 @@
 crates/star2-app/gen/schemas/
 scratch/**/target/
 scratch/**/*.exe
+node_modules/

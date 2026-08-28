@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0b0c0e;
+  --color-panel: #141619;
+  --color-field: #0e1013;
+  --color-line: #23262b;
+  --color-dim: #7c828c;
+  --color-accent: #3ea6ff;
+  --color-ok: #39d98a;
+  --color-warn: #d9b45b;
+  --color-bad: #d96b6b;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  user-select: none;
+}
+
+@layer base {
+  input,
+  select {
+    user-select: text;
+  }
+}
+
+@layer components {
+  .field {
+    @apply rounded border border-line bg-field px-1.5 py-1 font-mono text-[13px] text-neutral-200
+      focus:border-accent focus:outline-none;
+  }
+
+  .btn {
+    @apply cursor-pointer rounded border border-line bg-[#1b1e22] px-3 py-1 font-mono text-[13px]
+      text-neutral-200 hover:border-accent;
+  }
+}

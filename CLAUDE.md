@@ -78,8 +78,11 @@ not apply to a library read through `cargo doc`), and `star-screen` puts its one
 capture backend behind a trait (§1 does not apply when the alternative is that
 non-Windows targets stop compiling).
 
-star v1's history is the `legacy/star-v1` branch here. It is not an ancestor of
-`main` and must never be merged into it.
+star v1 is archived at `~/projects/archived/Star` — history intact, reference
+only, never developed. Nothing here imports it.
+
+The window's frontend lives in `crates/star2-app/ui`: Svelte 5 + Vite +
+Tailwind. Runes mode only, never `$:` — the rules are `AGENTS.md`.
 
 ## 6. Audio
 

@@ -4,10 +4,13 @@
   "version": "0.4.5",
   "identifier": "studio.v15.star2",
   "build": {
-    "frontendDist": "dist"
+    "beforeDevCommand": "bun --cwd ui dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "bun --cwd ui build",
+    "frontendDist": "../ui/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "title": "star2",
