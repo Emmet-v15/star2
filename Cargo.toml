@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/star2-proto", "crates/star2-rendezvous", "crates/star2-engine", "crates/star2-app"]
+members = ["crates/star2-rendezvous", "crates/star2-app"]
 exclude = ["scratch"]
 
 [workspace.package]
@@ -16,7 +16,6 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
-star2-proto = { path = "crates/star2-proto" }
 star-proto = { path = "../star-libs/crates/star-proto" }
 star-voice = { path = "../star-libs/crates/star-voice" }
 

@@ -26,10 +26,21 @@ no-op. That is why redundancy is done at the packet layer instead — see below.
 
 | crate | what |
 |---|---|
-| `star2-proto`  | wire types: media header, punch probe, rendezvous JSON |
 | `star2-rendezvous` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
-| `star2-engine` | client core: capture → Opus → UDP → jitter buffer → playback |
 | `star2-app`    | the `star2` window: a thin Tauri shell (join, status) plus self-update |
+
+The wire format and the client core are no longer here. They are libraries in
+[`star-libs`](../star-libs), a sibling checkout, and star2 depends on them by
+path:
+
+| crate | was |
+|---|---|
+| `star-proto` | `star2-proto` — media header, punch probe, rendezvous JSON, room tokens |
+| `star-voice` | `star2-engine` — capture → Opus → UDP → jitter buffer → playback |
+
+What stayed behind is the part that is specific to this deployment: the
+rendezvous URL and token, the room the window asks for, the Tauri shell, and
+self-update. Cloning star2 now means cloning star-libs beside it.
 
 The jitter buffer and hole-punch FSM are ported from star v1, which is where that
 tuning was worked out.

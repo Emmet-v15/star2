@@ -102,20 +102,22 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                     let _ = reply.send(Err("already in a call".into()));
                     continue;
                 }
-                let mut cfg = CallConfig::default();
-                cfg.name = pc_name().unwrap_or_else(|| "anon".into());
-                cfg.url = env_or("STAR2_URL", RENDEZVOUS_URL);
-                cfg.token = RENDEZVOUS_TOKEN.into();
-                cfg.input = env_or("STAR2_INPUT", "");
-                cfg.output = env_or("STAR2_OUTPUT", "");
-                cfg.seed_relay = seed_relay;
-                cfg.seed_peer = seed_peer;
-
                 let (token, minted) = match star_proto::is_room_token(&requested) {
                     true => (requested.clone(), false),
                     false => (star_proto::new_room_token(&requested), true),
                 };
-                cfg.room_token = token.clone();
+
+                let cfg = CallConfig {
+                    url: env_or("STAR2_URL", RENDEZVOUS_URL),
+                    room_token: token.clone(),
+                    name: pc_name().unwrap_or_else(|| "anon".into()),
+                    token: RENDEZVOUS_TOKEN.into(),
+                    input: env_or("STAR2_INPUT", ""),
+                    output: env_or("STAR2_OUTPUT", ""),
+                    seed_relay,
+                    seed_peer,
+                    ..Default::default()
+                };
 
                 let emitter = app.clone();
                 match start_call(cfg, move |e| {

@@ -3618,34 +3618,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "star2-engine"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "audiopus",
- "cpal",
- "futures-util",
- "getrandom 0.3.4",
- "ringbuf",
- "rustls",
- "serde",
- "serde_json",
- "star2-proto",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "star2-proto"
-version = "0.0.0"
-dependencies = [
- "getrandom 0.3.4",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "star2-rendezvous"
 version = "0.0.0"
 dependencies = [
