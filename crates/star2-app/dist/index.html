@@ -48,6 +48,16 @@
             border-radius:2px; transition:width .25s linear, background-color .2s; }
   .gv { color:#b9c6d4; text-align:right; opacity:.85; font-variant-numeric:tabular-nums; font-size:12px; }
 
+  /* Device pickers: shown only when idle, so the in-call window stays bare. */
+  #devices { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+             padding:10px; display:flex; flex-direction:column; gap:6px; }
+  #devices .hd { color:var(--dim); letter-spacing:.5px; font-size:11px; margin-bottom:2px; }
+  .d { display:grid; grid-template-columns:34px 1fr; align-items:center; gap:8px; }
+  .d > span { color:#8093a6; letter-spacing:.5px; font-size:11px; }
+  select { background:#0e1013; color:var(--txt); border:1px solid var(--line); border-radius:4px;
+           padding:4px 6px; font:inherit; width:100%; min-width:0; }
+  select:focus { outline:none; border-color:var(--accent); }
+
   #fatal { color:var(--bad); white-space:pre-wrap; user-select:text; }
   details summary { cursor:pointer; color:var(--dim); font-size:11px; letter-spacing:.5px; }
   #log { margin-top:6px; max-height:150px; overflow-y:auto; background:#0e1013;
@@ -74,6 +84,11 @@
     <div id="tele" style="display:none">
       <div class="hd">TELEMETRY</div>
     </div>
+    <div id="devices">
+      <div class="hd">AUDIO</div>
+      <label class="d"><span>IN</span><select id="inDev"></select></label>
+      <label class="d"><span>OUT</span><select id="outDev"></select></label>
+    </div>
     <div id="fatal"></div>
     <details>
       <summary>ENGINE LOG</summary>
@@ -96,6 +111,7 @@ function setPhase(p) {
   $("joinGroup").style.display    = p === "idle" || p === "down" ? "flex" : "none";
   $("inCallGroup").style.display  = p === "connecting" || p === "live" ? "flex" : "none";
   $("tele").style.display         = p === "connecting" || p === "live" ? "flex" : "none";
+  $("devices").style.display      = p === "idle" || p === "down" ? "flex" : "none";
   if (p !== "live") $("stext").textContent = { idle:"idle", connecting:"connecting…", down:"error" }[p] || p;
   if (p === "down") { $("dot").className = "down"; return; }
   $("dot").className = { idle:"", connecting:"connecting", live:"live" }[p] || "";
@@ -151,10 +167,43 @@ function renderStats(s) {
            s.path);
 }
 
+// Device names are the whole contract: star-voice matches them as a
+// case-insensitive substring, so handing back exactly what it listed always
+// resolves. Empty value = let the engine take the system default.
+async function loadDevices() {
+  let devs;
+  try {
+    devs = await invoke("audio_devices");
+  } catch (e) {
+    $("fatal").textContent = "audio devices: " + e;
+    return;
+  }
+  for (const [id, list, key] of [["inDev", devs.input, "star2.in"],
+                                 ["outDev", devs.output, "star2.out"]]) {
+    const sel = $(id);
+    const remembered = localStorage.getItem(key) || "";
+    sel.innerHTML = "";
+    for (const d of list) {
+      const o = document.createElement("option");
+      o.value = d.name;
+      o.textContent = d.default ? d.name + "  (default)" : d.name;
+      sel.appendChild(o);
+    }
+    // Only reselect a remembered device if it is still plugged in.
+    if (remembered && list.some((d) => d.name === remembered)) sel.value = remembered;
+    sel.onchange = () => localStorage.setItem(key, sel.value);
+  }
+}
+loadDevices();
+
 $("go").onclick = async () => {
   $("go").disabled = true;
   try {
-    const token = await invoke("join", { room: $("room").value });
+    const token = await invoke("join", {
+      room: $("room").value,
+      input: $("inDev").value || "",
+      output: $("outDev").value || "",
+    });
     if (!token) throw new Error("engine returned no room token");
     $("code").value = token;
     localStorage.setItem("star2.room", token);
@@ -177,6 +226,7 @@ $("leave").onclick = async () => {
   try { await invoke("leave"); } catch (_) {}
   $("fatal").textContent = "";
   setPhase("idle");
+  loadDevices();
 };
 
 function appendLog(line) {

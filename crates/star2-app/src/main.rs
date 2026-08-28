@@ -20,19 +20,26 @@ struct SeedFile {
     ts: u64,
     relay: String,
     peer: String,
+    devices: Devices,
 }
 
 fn seed_path(me: &Path) -> PathBuf {
     me.with_extension("restart-seed.json")
 }
 
-fn write_restart_seed(me: &Path, room: &str, route: Option<(std::net::SocketAddr, String)>) {
+fn write_restart_seed(
+    me: &Path,
+    room: &str,
+    devices: Devices,
+    route: Option<(std::net::SocketAddr, String)>,
+) {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else { return };
     let seed = SeedFile {
         room: room.to_string(),
         ts: now.as_secs(),
         relay: route.as_ref().map(|(_, r)| r.clone()).unwrap_or_default(),
         peer: route.map(|(p, _)| p.to_string()).unwrap_or_default(),
+        devices,
     };
     let Ok(json) = serde_json::to_string(&seed) else { return };
     let tmp = me.with_extension("restart-seed.tmp");
@@ -72,10 +79,22 @@ fn emit_status(app: &AppHandle, text: String) {
     let _ = app.emit("engine", Event::Status { text });
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug, Default, Clone)]
+struct Devices {
+    input: String,
+    output: String,
+}
+
 enum CallMsg {
-    Join { room: String, seed_relay: String, seed_peer: String, reply: SyncSender<Result<String, String>> },
+    Join {
+        room: String,
+        devices: Devices,
+        seed_relay: String,
+        seed_peer: String,
+        reply: SyncSender<Result<String, String>>,
+    },
     Leave { reply: Sender<()> },
-    Shutdown { reply: Sender<(Option<String>, Option<(std::net::SocketAddr, String)>)> },
+    Shutdown { reply: Sender<(Option<String>, Devices, Option<(std::net::SocketAddr, String)>)> },
 }
 
 struct App {
@@ -95,9 +114,10 @@ fn spawn_call_owner(app: AppHandle) -> Sender<CallMsg> {
 fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
     let mut call: Option<CallHandle> = None;
     let mut room: Option<String> = None;
+    let mut chosen = Devices::default();
     for msg in rx {
         match msg {
-            CallMsg::Join { room: requested, seed_relay, seed_peer, reply } => {
+            CallMsg::Join { room: requested, devices, seed_relay, seed_peer, reply } => {
                 if call.is_some() {
                     let _ = reply.send(Err("already in a call".into()));
                     continue;
@@ -107,13 +127,14 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                     false => (star_proto::new_room_token(&requested), true),
                 };
 
+                chosen = devices.clone();
                 let cfg = CallConfig {
                     url: env_or("STAR2_URL", RENDEZVOUS_URL),
                     room_token: token.clone(),
                     name: pc_name().unwrap_or_else(|| "anon".into()),
                     token: RENDEZVOUS_TOKEN.into(),
-                    input: env_or("STAR2_INPUT", ""),
-                    output: env_or("STAR2_OUTPUT", ""),
+                    input: env_or("STAR2_INPUT", &devices.input),
+                    output: env_or("STAR2_OUTPUT", &devices.output),
                     seed_relay,
                     seed_peer,
                     ..Default::default()
@@ -151,24 +172,50 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                 if let Some(h) = call.take() {
                     h.stop();
                 }
-                let _ = reply.send((room.take(), route));
+                let _ = reply.send((room.take(), std::mem::take(&mut chosen), route));
             }
         }
     }
 }
 
-fn request_join(state: &App, room: &str, seed_relay: String, seed_peer: String) -> Result<String, String> {
+fn request_join(
+    state: &App,
+    room: &str,
+    devices: Devices,
+    seed_relay: String,
+    seed_peer: String,
+) -> Result<String, String> {
     let (reply_tx, reply_rx) = sync_channel(1);
     state
         .call_tx
-        .send(CallMsg::Join { room: room.to_string(), seed_relay, seed_peer, reply: reply_tx })
+        .send(CallMsg::Join {
+            room: room.to_string(),
+            devices,
+            seed_relay,
+            seed_peer,
+            reply: reply_tx,
+        })
         .map_err(|_| "call thread gone".to_string())?;
     reply_rx.recv().map_err(|_| "call thread gone".to_string())?
 }
 
 #[tauri::command]
-fn join(state: State<App>, room: String) -> Result<String, String> {
-    request_join(&state, room.trim(), String::new(), String::new())
+fn join(state: State<App>, room: String, input: String, output: String) -> Result<String, String> {
+    request_join(&state, room.trim(), Devices { input, output }, String::new(), String::new())
+}
+
+#[derive(Serialize)]
+struct AudioDevices {
+    input: Vec<star_voice::AudioDevice>,
+    output: Vec<star_voice::AudioDevice>,
+}
+
+#[tauri::command]
+fn audio_devices() -> Result<AudioDevices, String> {
+    Ok(AudioDevices {
+        input: star_voice::input_devices().map_err(|e| format!("{e:#}"))?,
+        output: star_voice::output_devices().map_err(|e| format!("{e:#}"))?,
+    })
 }
 
 #[tauri::command]
@@ -190,9 +237,9 @@ fn restart_into_update(app: &AppHandle) -> ! {
     if let Err(why) = state.call_tx.send(CallMsg::Shutdown { reply: reply_tx }) {
         eprintln!("shutdown send failed: {why}");
     }
-    let (room, route) = reply_rx.recv().unwrap_or((None, None));
+    let (room, devices, route) = reply_rx.recv().unwrap_or_default();
     if let Some(room) = room.as_deref() {
-        write_restart_seed(&state.me, room, route);
+        write_restart_seed(&state.me, room, devices, route);
     }
     app.restart()
 }
@@ -219,7 +266,7 @@ fn spawn_upkeep(app: AppHandle) {
 
         if let Some(seed) = load_restart_seed(&me) {
             let _ = std::fs::remove_file(seed_path(&me));
-            let _ = request_join(&state, &seed.room, seed.relay, seed.peer);
+            let _ = request_join(&state, &seed.room, seed.devices, seed.relay, seed.peer);
         }
 
         loop {
@@ -249,7 +296,7 @@ fn main() {
             spawn_upkeep(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![join, leave, display_name])
+        .invoke_handler(tauri::generate_handler![join, leave, display_name, audio_devices])
         .run(tauri::generate_context!())
         .expect("error while running star2");
 }
@@ -270,6 +317,7 @@ mod tests {
         write_restart_seed(
             &me,
             "general",
+            Devices { input: "Yeti".into(), output: "Speakers".into() },
             Some(("203.0.113.7:51820".parse().unwrap(), "empire:40001".into())),
         );
         let s = load_restart_seed(&me).expect("a just-written seed must validate");
@@ -279,6 +327,11 @@ mod tests {
             "the peer endpoint is the whole point of the seed"
         );
         assert_eq!(s.relay, "empire:40001");
+        assert_eq!(
+            s.devices,
+            Devices { input: "Yeti".into(), output: "Speakers".into() },
+            "the successor must reopen the devices the user chose, not the system defaults"
+        );
         assert!(seed_path(&me).exists(), "loading must not consume a valid seed");
 
         let _ = std::fs::remove_file(seed_path(&me));
@@ -291,7 +344,13 @@ mod tests {
 
         assert_eq!(load_restart_seed(&me), None, "no seed file means no seed");
 
-        let ancient = SeedFile { room: "x".into(), ts: 0, relay: String::new(), peer: String::new() };
+        let ancient = SeedFile {
+            room: "x".into(),
+            ts: 0,
+            relay: String::new(),
+            peer: String::new(),
+            devices: Devices::default(),
+        };
         std::fs::write(seed_path(&me), serde_json::to_string(&ancient).unwrap()).unwrap();
         assert_eq!(load_restart_seed(&me), None, "ts=0 is ancient history");
         assert!(!seed_path(&me).exists(), "a rejected seed must not linger");
