@@ -36,7 +36,7 @@ fi
 echo "==> version $LIVE -> $VER"
 
 echo "==> building $LOCAL"
-cargo build --release -p star2-cli
+cargo build --release -p star2-app
 
 echo "==> uploading -> $WEBROOT/$REMOTE"
 # Upload to /tmp then move: opc can't write the webroot directly, and a
@@ -46,14 +46,9 @@ ssh "$HOST" "sudo -n mv -f /tmp/$REMOTE $WEBROOT/$REMOTE && sudo -n chmod 644 $W
 
 # The manifest is what a running star2.exe compares itself against. The hash is
 # the integrity check, so it must come from the exact bytes just uploaded.
-#
-# runner_sha256/runner_url are a ONE-SHOT BRIDGE for installs still running the
-# old two-binary layout: they make the old runner swap ITSELF into this binary
-# and relaunch, which lands them on the single-binary layout in one step.
-# DELETE THEM once nobody reports a version below 0.3.0.
 SHA=$(sha256sum "$LOCAL" | cut -d' ' -f1)
-printf '{"version":"%s","sha256":"%s","url":"https://v15.studio/%s","runner_sha256":"%s","runner_url":"https://v15.studio/%s"}\n' \
-    "$VER" "$SHA" "$REMOTE" "$SHA" "$REMOTE" > /tmp/star2.json
+printf '{"version":"%s","sha256":"%s","url":"https://v15.studio/%s"}\n' \
+    "$VER" "$SHA" "$REMOTE" > /tmp/star2.json
 scp -q /tmp/star2.json "$HOST:/tmp/star2-manifest.json"
 ssh "$HOST" "sudo -n mv -f /tmp/star2-manifest.json $WEBROOT/$MANIFEST && sudo -n chmod 644 $WEBROOT/$MANIFEST"
 echo "==> manifest $VER $SHA"

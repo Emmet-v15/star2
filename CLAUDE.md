@@ -46,7 +46,8 @@ merged version is slightly worse at the edges.
   it.** A failed punch ends the call.
 - **Must not depend on the rendezvous server being up.** A call already in
   progress survives the rendezvous server going away.
-- No UI beyond the terminal.
+- **Minimal window, terminal restraint.** One Tauri window: room token, join,
+  status. Nothing gets a button until it earns one.
 - Windows is the target. macOS and Android are out of scope until there is a
   plan that does not cost more than the feature is worth.
 
@@ -82,26 +83,28 @@ The rendezvous server says a new build exists; the client is running it moments
 later. No prompt, no restart the user has to perform. **The call does not survive
 the swap** - that promise was retired with the generational-handoff architecture.
 What the update promises instead: the client stages and verifies the download,
-stops the engine, renames the new binary into place, and relaunches with the same
-arguments; the fresh build rejoins the same room token and re-punches through the
-exact paths every cold start already uses. An update costs a peer seconds of
-silence and one redial, never a manual step and never a stuck client.
+stops the engine, renames the new binary into place, and relaunches; the fresh
+build rejoins the same room token and re-punches through the exact paths every
+cold start already uses. An update costs a peer seconds of silence and one
+redial, never a manual step and never a stuck client.
 
 These follow from it, and are settled:
 
 - **Stage and verify before touching the running image.** A download that fails
   its hash check leaves the current build running untouched.
-- **Relaunch carries the arguments, especially `--room`.** A relaunched build must
-  never sit at an interactive prompt: stdin belongs to whoever started it.
+- **Relaunch carries the room.** A relaunched build must never sit at a prompt
+  asking what to join: the restart seed written just before the swap names the
+  room, and the fresh build rejoins it without asking.
 - **Reconnect paths are the update surface.** Rendezvous reconnect, roster
   re-evaluation, and the punch FSM with its retry/backoff are what make a restart
   cheap; treat their health as update health.
 - **A restart seed is a hint, never a shortcut.** The outgoing build may leave the
   relay's reflex-probe endpoint and the peer's last direct address beside the
   binary; the successor fires its reflexive probe early and merges the hint into
-  its candidate list. Nonces still gate every probe, and a missing, stale, or
-  foreign-room seed is discarded silently.
+  its candidate list. Nonces still gate every probe, and a missing or stale seed
+  is discarded silently.
+- **One window, no chrome.** The Tauri shell inherited the terminal's restraint
+  (§4); the window is not an invitation to start adding chrome.
 - **One binary.** No supervisor, no parent process. The runner/engine split was
   tried and deleted (`477c190`); the socket-duplication handover built on top of
   it was deleted with the restart model - do not reintroduce either.
-- **Terminal, not GUI.** Decided in §4 on its own merits.

@@ -1,6 +1,6 @@
 # star2
 
-Barebones peer-to-peer voice call. 48 kHz Opus, direct UDP, no UI.
+Barebones peer-to-peer voice call. 48 kHz Opus, direct UDP, one small window.
 
 `empire` runs a **rendezvous server**: it brokers the hole punch and
 answers reflexive-address probes. Audio never passes through it — once the punch
@@ -29,19 +29,30 @@ no-op. That is why redundancy is done at the packet layer instead — see below.
 | `star2-proto`  | wire types: media header, punch probe, rendezvous JSON |
 | `star2-rendezvous` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
 | `star2-engine` | client core: capture → Opus → UDP → jitter buffer → playback |
-| `star2-cli`    | the `star2` binary: CLI, self-update. The CLI is the whole UI |
+| `star2-app`    | the `star2` window: a thin Tauri shell (join, status) plus self-update |
 
 The jitter buffer and hole-punch FSM are ported from star v1, which is where that
 tuning was worked out.
 
-## Running
-
-Download `star2.exe` from v15.studio once and run it. Run it with no arguments and
-it asks for a room token; blank makes a new one.
+## Building
 
 ```sh
-star2.exe --room general --name me
+cargo build --release -p star2-app        # -> target/release/star2.exe
+cargo test --release                      # whole workspace
 ```
+
+`.github/workflows/build.yml` does this on every push to `main`: the Windows
+client on `windows-latest` and the rendezvous server cross-compiled to aarch64
+with zigbuild, both uploaded to the `dev-builds` GitHub release. Publishing to
+v15.studio stays manual: `./deploy/publish-client.sh`, which refuses to ship
+without a version bump in `Cargo.toml` and always POSTs the update nudge.
+
+## Running
+
+Download `star2.exe` from v15.studio once and run it. Type a room token into the
+window and hit Join; leave it blank and you get a brand-new room to share. Your
+display name is the machine's name, audio uses the system devices at mono
+128 kbps.
 
 There is **one** binary and it updates itself. On startup — and again whenever the
 rendezvous server nudges it — it compares its own SHA-256 against the manifest, and if they
@@ -53,20 +64,20 @@ The download is verified before any of that touches disk state that matters, so 
 failed update leaves the running build untouched.
 
 Then it restarts into the new build. Idle or mid-call, the path is the same:
-stop the engine, relaunch with the same arguments — the room token rides along,
-so there is never an interactive prompt — and the fresh build rejoins the same
-room and re-punches through the paths every cold start already uses. There is no
-supervising process and no second binary. An update costs each peer a few seconds
-of silence and one redial; the call does not survive the swap by design, and no
-machinery exists to pretend otherwise.
+stop the engine, relaunch — the restart seed written moments before names the
+room, so the fresh build rejoins it without asking — and re-punches through
+the paths every cold start already uses. There is no supervising process and no
+second binary. An update costs each peer a few seconds of silence and one redial;
+the call does not survive the swap by design, and no machinery exists to pretend
+otherwise.
 
 To keep that rejoin cheap, the outgoing process leaves a tiny restart seed beside
 the binary: the relay's reflex-probe endpoint, the peer's last direct address,
 the room token, and a timestamp. The successor uses them only as accelerators —
 the reflexive probe fires before signalling finishes, and the hinted endpoint
 joins the first candidate wave. Nothing is trusted: every punch still requires
-the nonce exchange over the rendezvous server, and a missing, stale (over 120 s),
-or foreign-room seed is deleted so plain cold-start discovery proceeds silently.
+the nonce exchange over the rendezvous server, and a missing or stale (over 120 s)
+seed is deleted so plain cold-start discovery proceeds silently.
 
 ### How updates arrive
 
@@ -87,25 +98,13 @@ download itself.
 
 There is no crash supervisor. If star2 dies, you start it again.
 
-Both peers must pass the same `--room`. The lower session id becomes the punch
+Both peers must join the same room token. The lower session id becomes the punch
 controller, so glare can't happen.
 
-| flag | default | meaning |
-|---|---|---|
-| `--url` | `wss://star.v15.studio/star2` | rendezvous server |
-| `--room` | prompted | both peers must match |
-| `--create <NAME>` | | mint a new room token, print it, join it |
-| `--name` | hostname | display name |
-| `--token` | baked in | shared secret |
-| `--stereo` | off | send 2 channels instead of 1 |
-| `--bitrate` | 128k mono / 256k stereo | Opus bitrate |
-| `--input` / `--output` | system default | device name substring |
-| `--dev-buf <MS>` | 0 (device default) | device buffer request; lower = less latency |
-| `--stats` | off | 1 Hz jitter/loss/rate readout |
-| `--verbose` | off | audio/punching/jitter internals |
-| `--list-devices` | | print devices and exit |
-
-`--create` mints a **new** token every run; use `--room` to return to an existing one.
+The window exposes exactly one control today: the room token. Devices are the
+system defaults, audio is mono 128 kbps at the baked-in rendezvous URL, and your
+display name is the machine's name. The engine still supports stereo, explicit
+devices, bitrate and buffer tuning; the knobs just have not been drawn yet.
 
 ## Latency
 
@@ -115,8 +114,8 @@ on device under-run and shrinks after a clean stretch, with the clean period dou
 each time it flaps so a marginal device settles instead of oscillating.
 
 If capture granularity is coarse (packets leave in bursts), receivers read that as
-jitter and size the buffer up. `--dev-buf 5` asks for a smaller device buffer and
-usually shrinks the far end's buffer with it.
+jitter and size the buffer up; a smaller device buffer usually shrinks the far
+end's buffer with it.
 
 The buffer only ever grows or sheds in bulk. It never discards a frame to trim
 itself — deliberately dropping good audio to save a few milliseconds is a glitch you
@@ -159,10 +158,10 @@ Verified:
   87/163 ms, media both ways at 200 pkt/s, 0% loss, the full latency chain logged —
   re-confirmed on the handover-free build.
 - Reflexive discovery through the real NAT (`wss://` rendezvous + UDP 40001).
-- 65 unit tests: wire round-trips, punch authorisation and the retry/timeout role
+- unit tests covering: wire round-trips, punch authorisation and the retry/timeout role
   split, a full two-state punch over real loopback sockets, restart re-adoption
   (a fresh controller re-offers to the waiting peer; a fresh responder arms
-  silently), jitter estimator, resampler, room tokens, argument resolution,
+  silently), jitter estimator, resampler, room tokens, restart seeds,
   packet redundancy.
 
 Not yet verified:
@@ -189,6 +188,8 @@ Not yet verified:
   What it still never does is relay through the rendezvous server — if the punch
   cannot succeed, neither can the call.
 - 1:1 only — a third peer in a room ends the call rather than mixing.
+- The window has no stereo / device / bitrate / buffer controls yet; the engine
+  takes all of those, the UI just does not expose them.
 - No encryption of the media payload. The punch nonce is protected by the
   rendezvous TLS, so an off-path attacker cannot redirect media, but an on-path one
   can read audio.

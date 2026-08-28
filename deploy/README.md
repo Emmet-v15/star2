@@ -3,6 +3,9 @@
 Everything that touches `empire` or `v15.studio` lives here. All scripts are
 idempotent and safe to re-run.
 
+The rendezvous box is reached as `ssh empire` — the service lives in
+`/home/opc/star2`, config in `/home/opc/star2/star2.env`.
+
 | file | what it does |
 |---|---|
 | `publish-client.sh` | build `star2.exe`, upload it to `v15.studio/star2.exe`, write the manifest, nudge every connected client |
@@ -48,8 +51,7 @@ Both are already applied for 40001/udp. The OCI ingress rule was added with the
 
 ## CI
 
-`.github/workflows/build.yml` builds the Windows client plus the aarch64
-rendezvous server. **Artifact upload currently fails**: the account's Actions artifact
-storage quota is full (star v1's CI uploads an ~80 MB AppImage and an APK on every
-run). Until that's cleared, publish with `publish-client.sh` — which is also why
-that script exists.
+`.github/workflows/build.yml` builds the Windows client and the aarch64
+rendezvous server on every push to main and uploads both to the `dev-builds`
+GitHub release. Publishing a release to v15.studio stays manual:
+`./deploy/publish-client.sh`.
