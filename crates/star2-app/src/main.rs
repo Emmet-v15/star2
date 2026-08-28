@@ -304,18 +304,32 @@ fn spawn_upkeep(app: AppHandle) {
         let manifest_url = env_or("STAR2_MANIFEST_URL", MANIFEST_URL);
         let updates_ws = env_or("STAR2_UPDATES_WS", UPDATES_WS);
 
-        match updater::check_at_startup(&me, &manifest_url) {
-            updater::Outcome::Installed { version } => {
-                emit_status(&app, format!("update {version} installed - restarting"));
-                restart_into_update(&app);
+        // Staleness is decided by binary sha256, so a dev build never matches
+        // the release manifest: the updater would swap the production binary
+        // over the one cargo just built and restart into it. Dev builds never
+        // self-update.
+        if cfg!(debug_assertions) {
+            log("updater disabled: dev build");
+        } else {
+            match updater::check_at_startup(&me, &manifest_url) {
+                updater::Outcome::Installed { version } => {
+                    emit_status(&app, format!("update {version} installed - restarting"));
+                    restart_into_update(&app);
+                }
+                updater::Outcome::Failed { why } => {
+                    emit_status(&app, format!("update unavailable: {why}"))
+                }
+                updater::Outcome::Current => {}
             }
-            updater::Outcome::Failed { why } => emit_status(&app, format!("update unavailable: {why}")),
-            updater::Outcome::Current => {}
         }
 
         if let Some(seed) = load_restart_seed(&me) {
             let _ = std::fs::remove_file(seed_path(&me));
             let _ = request_join(&state, &seed.room, seed.devices, seed.relay, seed.peer);
+        }
+
+        if cfg!(debug_assertions) {
+            return;
         }
 
         loop {
