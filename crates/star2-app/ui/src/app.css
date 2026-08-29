@@ -18,7 +18,14 @@ body {
   height: 100%;
 }
 
+:root {
+  color-scheme: dark;
+}
+
 body {
+  background: var(--color-bg);
+  color: #e5e5e5;
+  font: 13px/1.4 var(--font-mono);
   user-select: none;
 }
 
