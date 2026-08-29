@@ -20,6 +20,13 @@ export type EngineEvent =
       tx_pps: number;
       mic_db: number;
       rtt_ms: number;
+      jb_ms: number;
+      dev_in_ms: number;
+      in_ring_ms: number;
+      enc_ms: number;
+      tx_path_ms: number;
+      dev_out_ms: number;
+      rx_path_ms: number;
       path: string;
     }
   | { t: "log"; line: string };
