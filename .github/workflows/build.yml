@@ -16,10 +16,10 @@ jobs:
   client:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: star2
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: Emmet-v15/star-libs
           path: star-libs
@@ -64,10 +64,10 @@ jobs:
     # aarch64 relay box straight from Linux.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: star2
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: Emmet-v15/star-libs
           path: star-libs
