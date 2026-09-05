@@ -1,5 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { inBrowser, listenMock, mockInvoke } from "./browser-dev.svelte";
+
+export const invoke = async (
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> => (inBrowser ? mockInvoke(cmd, args) : tauriInvoke(cmd, args));
 
 export type AudioDevice = { name: string; default: boolean };
 export type AudioDevices = { input: AudioDevice[]; output: AudioDevice[] };
@@ -45,7 +51,7 @@ export const call = $state({
 
 export async function refreshDevices(): Promise<void> {
   try {
-    const devs: AudioDevices = await invoke("audio_devices");
+    const devs = (await invoke("audio_devices")) as AudioDevices;
     call.devices = devs;
     for (const key of ["input", "output"] as const) {
       const remembered = call[key];
@@ -65,11 +71,11 @@ export async function join(roomInput: string): Promise<void> {
   call.fatal = "";
   call.phase = "connecting";
   try {
-    const token: string = await invoke("join", {
+    const token = (await invoke("join", {
       room: roomInput,
       input: call.input,
       output: call.output,
-    });
+    })) as string;
     if (!token) throw new Error("engine returned no room token");
     call.room = token;
     localStorage.setItem("star2.room", token);
@@ -95,6 +101,7 @@ export async function copyRoom(): Promise<void> {
   } catch (_) {}
 }
 
-export function listenEngine(onEvent: (e: EngineEvent) => void): Promise<UnlistenFn> {
+export async function listenEngine(onEvent: (e: EngineEvent) => void): Promise<UnlistenFn> {
+  if (inBrowser) return listenMock(onEvent);
   return listen<EngineEvent>("engine", (e) => onEvent(e.payload));
 }

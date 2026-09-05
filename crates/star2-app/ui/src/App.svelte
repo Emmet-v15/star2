@@ -55,69 +55,86 @@
 </script>
 
 <div class="flex h-screen flex-col font-mono text-[13px] text-neutral-200">
-  <header class="flex items-center gap-2 border-b border-line bg-panel px-2.5 py-2">
+  <header class="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-2.5 py-2">
     <span class="font-bold tracking-widest text-accent">STAR2</span>
     {#if call.phase === "idle" || call.phase === "down"}
-      <span class="flex min-w-0 flex-1 gap-2">
-        <input
-          class="field min-w-0 flex-1"
-          placeholder="room token (blank = new room)"
-          spellcheck="false"
-          autocomplete="off"
-          bind:value={roomInput}
-          onkeydown={(e) => e.key === "Enter" && join(roomInput)}
-        />
-        <button class="btn" onclick={() => void join(roomInput)}>Join</button>
-      </span>
+      <input
+        class="field min-w-0 flex-1"
+        placeholder="room token (blank = new room)"
+        spellcheck="false"
+        autocomplete="off"
+        bind:value={roomInput}
+        onkeydown={(e) => e.key === "Enter" && join(roomInput)}
+      />
+      <button class="btn" onclick={() => void join(roomInput)}>Join</button>
     {:else}
-      <span class="flex min-w-0 flex-1 items-center gap-2">
-        <button class="btn" onclick={() => void leave()}>Leave</button>
-        <input
-          readonly
-          class="field min-w-0 flex-1 border-none bg-transparent font-bold tracking-wide text-white"
-          title="room token — share it"
-          bind:value={call.room}
-        />
-        <button class="btn" onclick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>
-      </span>
+      <button class="btn" onclick={() => void leave()}>Leave</button>
     {/if}
     <span class="ml-auto flex shrink-0 items-center gap-1.5 text-dim">
       <span class="size-2 rounded-full {dot}"></span>
-      <span class="truncate">{call.status}</span>
+      <span class="max-w-[220px] truncate">{call.status}</span>
     </span>
   </header>
 
-  {#if call.phase === "idle" || call.phase === "down"}
-    <section class="m-2.5 flex flex-col gap-1.5 rounded-lg border border-line bg-panel p-2.5">
-      <div class="text-[11px] tracking-wide text-dim">AUDIO</div>
-      <label class="grid grid-cols-[34px_1fr] items-center gap-2">
-        <span class="text-[11px] tracking-wide text-dim">IN</span>
-        <select
-          class="field"
-          bind:value={call.input}
-          onchange={() => localStorage.setItem("star2.in", call.input)}
-        >
-          {#each call.devices.input as d (d.name)}
-            <option value={d.name}>{d.name}{d.default ? "  (default)" : ""}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="grid grid-cols-[34px_1fr] items-center gap-2">
-        <span class="text-[11px] tracking-wide text-dim">OUT</span>
-        <select
-          class="field"
-          bind:value={call.output}
-          onchange={() => localStorage.setItem("star2.out", call.output)}
-        >
-          {#each call.devices.output as d (d.name)}
-            <option value={d.name}>{d.name}{d.default ? "  (default)" : ""}</option>
-          {/each}
-        </select>
-      </label>
-    </section>
-  {/if}
+  <main class="flex min-h-0 flex-1 flex-col gap-2.5 p-2.5">
+    {#if call.phase === "idle" || call.phase === "down"}
+      <section class="flex shrink-0 flex-col gap-1.5 rounded-lg border border-line bg-panel p-2.5">
+        <div class="text-[11px] tracking-wide text-dim">AUDIO</div>
+        <label class="grid grid-cols-[34px_1fr] items-center gap-2">
+          <span class="text-[11px] tracking-wide text-dim">IN</span>
+          <select
+            class="field"
+            bind:value={call.input}
+            onchange={() => localStorage.setItem("star2.in", call.input)}
+          >
+            {#each call.devices.input as d (d.name)}
+              <option value={d.name}>{d.name}{d.default ? "  (default)" : ""}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="grid grid-cols-[34px_1fr] items-center gap-2">
+          <span class="text-[11px] tracking-wide text-dim">OUT</span>
+          <select
+            class="field"
+            bind:value={call.output}
+            onchange={() => localStorage.setItem("star2.out", call.output)}
+          >
+            {#each call.devices.output as d (d.name)}
+              <option value={d.name}>{d.name}{d.default ? "  (default)" : ""}</option>
+            {/each}
+          </select>
+        </label>
+      </section>
+    {/if}
 
-  {#if call.fatal}
-    <p class="mx-2.5 mb-2.5 select-text whitespace-pre-wrap text-bad">{call.fatal}</p>
-  {/if}
+    {#if call.fatal}
+      <p class="select-text whitespace-pre-wrap text-bad">{call.fatal}</p>
+    {/if}
+
+    <section
+      class="grid min-h-0 flex-1 place-items-center rounded-lg border border-line bg-panel"
+    >
+      {#if call.phase === "live"}
+        <div class="flex flex-col items-center gap-2">
+          <div
+            class="max-w-full truncate px-4 text-center text-lg font-bold tracking-wider text-white select-text"
+          >
+            {call.room}
+          </div>
+          <button class="btn" onclick={() => void copy()}>{copied ? "Copied" : "Copy token"}</button>
+          <div class="text-[11px] text-dim">share it — whoever joins rings you</div>
+        </div>
+      {:else if call.phase === "connecting"}
+        <div class="flex flex-col items-center gap-2 text-dim">
+          <span class="size-2.5 animate-pulse rounded-full bg-warn"></span>
+          <span class="text-[11px] tracking-widest uppercase">{call.status || "punching"}</span>
+        </div>
+      {:else}
+        <div class="flex flex-col items-center gap-1 text-dim">
+          <span class="text-2xl text-line">◉</span>
+          <span class="text-[11px]">join a room to talk</span>
+        </div>
+      {/if}
+    </section>
+  </main>
 </div>
