@@ -52,6 +52,7 @@ export const call = $state({
   input: localStorage.getItem("star2.in") ?? "",
   output: localStorage.getItem("star2.out") ?? "",
   members: [] as Member[],
+  micDb: null as number | null,
 });
 
 export async function refreshDevices(): Promise<void> {
@@ -100,6 +101,7 @@ export async function leave(): Promise<void> {
   call.phase = "idle";
   call.status = "idle";
   call.members = [];
+  call.micDb = null;
   await refreshDevices();
 }
 

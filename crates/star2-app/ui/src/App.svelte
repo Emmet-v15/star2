@@ -1,6 +1,7 @@
 <script lang="ts">
   import { call, copyRoom, join, leave, listenEngine, refreshDevices } from "./lib/engine.svelte";
   import { inBrowser, mockAddPeer, mockRemovePeer } from "./lib/browser-dev.svelte";
+  import Spectrum from "./lib/Spectrum.svelte";
 
   let roomInput = $state(call.room);
   let copied = $state(false);
@@ -38,9 +39,13 @@
           call.fatal = e.why;
           call.phase = "down";
           call.members = [];
+          call.micDb = null;
+          break;
+        case "stats":
+          call.micDb = e.mic_db;
           break;
         default:
-          break; // stats and log stay out of the window; star2.log holds history (CLAUDE.md §4)
+          break; // the rest of stats and log stay out of the window; star2.log holds history (CLAUDE.md §4)
       }
     });
     return () => {
@@ -130,9 +135,9 @@
       <p class="select-text whitespace-pre-wrap text-bad">{call.fatal}</p>
     {/if}
 
-    <section class="relative min-h-0 flex-1 rounded-lg border border-line bg-panel">
+    <section class="relative flex min-h-0 flex-1 flex-col rounded-lg border border-line bg-panel">
       {#if call.phase === "live" && call.members.length > 0}
-        <div class="grid h-full gap-2 {gridCols}">
+        <div class="grid min-h-0 flex-1 gap-2 {gridCols}">
           {#each call.members as m (m.session)}
             <div class="tile">
               <span class="grid size-12 place-items-center rounded-full bg-[#1b1e22] text-lg font-bold text-accent">
@@ -147,15 +152,18 @@
             </div>
           {/each}
         </div>
+        <div class="shrink-0 border-t border-line px-2">
+          <Spectrum />
+        </div>
         <button
-          class="absolute bottom-2 left-2 max-w-[60%] cursor-pointer truncate rounded border border-line bg-bg/80 px-2 py-0.5 text-[11px] text-dim hover:border-accent hover:text-neutral-200"
+          class="absolute bottom-14 left-2 max-w-[60%] cursor-pointer truncate rounded border border-line bg-bg/80 px-2 py-0.5 text-[11px] text-dim hover:border-accent hover:text-neutral-200"
           title="room token — click to copy"
           onclick={() => void copy()}
         >
           {copied ? "copied" : call.room}
         </button>
         {#if inBrowser}
-          <div class="absolute right-2 bottom-2 flex gap-1.5">
+          <div class="absolute right-2 bottom-14 flex gap-1.5">
             <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockAddPeer()}>+ peer</button>
             <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockRemovePeer()}>− peer</button>
           </div>

@@ -30,6 +30,43 @@ const later = (ms: number, e: EngineEvent) => {
 };
 const peerName = (): string => peerNames[nextPeer++ % peerNames.length] ?? "peer";
 
+let micTimer: ReturnType<typeof setInterval> | undefined;
+let micDb = -50;
+
+const statsFrame = (): EngineEvent => ({
+  t: "stats",
+  jitter_ms: 1.2,
+  target_ms: 40,
+  loss_pct: 0,
+  out_ms: 12,
+  rx_pps: 200,
+  play_fps: 200,
+  tx_pps: 200,
+  mic_db: micDb,
+  rtt_ms: 96,
+  jb_ms: 35,
+  dev_in_ms: 10,
+  in_ring_ms: 5,
+  enc_ms: 0.8,
+  tx_path_ms: 1,
+  dev_out_ms: 12,
+  rx_path_ms: 1,
+  path: "direct",
+});
+
+const startMicSimulation = () => {
+  micTimer = setInterval(() => {
+    micDb += (Math.random() - 0.45) * 12;
+    micDb = Math.min(-12, Math.max(-46, micDb + (micDb < -30 ? 3 : 0)));
+    emit(statsFrame());
+  }, 120);
+};
+
+const stopMicSimulation = () => {
+  if (micTimer !== undefined) clearInterval(micTimer);
+  micTimer = undefined;
+};
+
 export const mockInvoke = (cmd: string, _args?: Record<string, unknown>): unknown => {
   switch (cmd) {
     case "audio_devices":
@@ -37,19 +74,23 @@ export const mockInvoke = (cmd: string, _args?: Record<string, unknown>): unknow
     case "join": {
       peerSessions.length = 0;
       nextSession = 1;
+      micDb = -32;
       later(800, { t: "room_joined", room: "MOCK-ROOM-4F2A" });
       later(1600, { t: "status", text: "punching" });
       later(2600, { t: "direct", peer: "203.0.113.7:51820", ms: 96 });
-      later(2600, {
+      later(2650, statsFrame());
+      later(2660, {
         t: "peer_joined",
         session: (peerSessions.push(nextSession), nextSession++),
         name: peerName(),
       });
+      timers.push(setTimeout(startMicSimulation, 2700));
       return "MOCK-ROOM-4F2A";
     }
     case "leave":
       timers.forEach(clearTimeout);
       timers.length = 0;
+      stopMicSimulation();
       return "mock-machine";
     case "display_name":
       return "mock-machine";
