@@ -10,8 +10,12 @@ export const invoke = async (
 export type AudioDevice = { name: string; default: boolean };
 export type AudioDevices = { input: AudioDevice[]; output: AudioDevice[] };
 
+export type Member = { session: number; name: string; self: boolean };
+
 export type EngineEvent =
   | { t: "room_joined"; room: string }
+  | { t: "peer_joined"; session: number; name: string }
+  | { t: "peer_left"; session: number }
   | { t: "direct"; peer: string; ms: number }
   | { t: "ended"; why: string }
   | { t: "status"; text: string }
@@ -47,6 +51,7 @@ export const call = $state({
   devices: { input: [] as AudioDevice[], output: [] as AudioDevice[] },
   input: localStorage.getItem("star2.in") ?? "",
   output: localStorage.getItem("star2.out") ?? "",
+  members: [] as Member[],
 });
 
 export async function refreshDevices(): Promise<void> {
@@ -79,6 +84,8 @@ export async function join(roomInput: string): Promise<void> {
     if (!token) throw new Error("engine returned no room token");
     call.room = token;
     localStorage.setItem("star2.room", token);
+    const name = (await invoke("display_name")) as string;
+    call.members = [{ session: 0, name, self: true }];
   } catch (e) {
     call.fatal = String(e);
     call.phase = "down";
@@ -92,6 +99,7 @@ export async function leave(): Promise<void> {
   call.fatal = "";
   call.phase = "idle";
   call.status = "idle";
+  call.members = [];
   await refreshDevices();
 }
 

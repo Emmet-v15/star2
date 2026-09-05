@@ -46,4 +46,9 @@ body {
     @apply cursor-pointer rounded border border-line bg-[#1b1e22] px-3 py-1 font-mono text-[13px]
       text-neutral-200 hover:border-accent;
   }
+
+  .tile {
+    @apply relative flex min-h-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-lg
+      border border-line bg-field;
+  }
 }
