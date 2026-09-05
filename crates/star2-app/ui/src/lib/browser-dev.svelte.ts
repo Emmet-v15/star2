@@ -1,6 +1,9 @@
 // Dev-only stand-in for the Tauri bridge so the UI runs in a plain browser
 // (`bun run dev` without the Tauri shell). Never imported in a Tauri build.
 import type { AudioDevices, EngineEvent } from "./engine.svelte";
+import { inBrowser } from "./mic";
+
+export { inBrowser };
 
 const devices: AudioDevices = {
   input: [
@@ -17,8 +20,7 @@ const peerNames = ["night-raven", "quiet-fox", "old-harbor", "brass-lantern"];
 let nextSession = 1;
 let nextPeer = 0;
 const peerSessions: number[] = [];
-
-export const inBrowser = typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+const peerDb = new Map<number, number>();
 
 type Listener = (e: EngineEvent) => void;
 const listeners = new Set<Listener>();
@@ -59,12 +61,20 @@ const startMicSimulation = () => {
     micDb += (Math.random() - 0.45) * 12;
     micDb = Math.min(-12, Math.max(-46, micDb + (micDb < -30 ? 3 : 0)));
     emit(statsFrame());
+    for (const s of peerSessions) {
+      const db = peerDb.get(s) ?? -35;
+      let next = db + (Math.random() - 0.42) * 14;
+      next = Math.min(-13, Math.max(-45, next + (next < -28 ? 3.5 : 0)));
+      peerDb.set(s, next);
+      emit({ t: "peer_level", session: s, db: next });
+    }
   }, 120);
 };
 
 const stopMicSimulation = () => {
   if (micTimer !== undefined) clearInterval(micTimer);
   micTimer = undefined;
+  peerDb.clear();
 };
 
 export const mockInvoke = (cmd: string, _args?: Record<string, unknown>): unknown => {
@@ -73,6 +83,7 @@ export const mockInvoke = (cmd: string, _args?: Record<string, unknown>): unknow
       return devices;
     case "join": {
       peerSessions.length = 0;
+      peerDb.clear();
       nextSession = 1;
       micDb = -32;
       later(800, { t: "room_joined", room: "MOCK-ROOM-4F2A" });

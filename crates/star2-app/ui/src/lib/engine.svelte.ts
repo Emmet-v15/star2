@@ -1,6 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { inBrowser, listenMock, mockInvoke } from "./browser-dev.svelte";
+import { inBrowser } from "./mic";
+import { listenMock, mockInvoke } from "./browser-dev.svelte";
+import { ensureMic } from "./mic";
 
 export const invoke = async (
   cmd: string,
@@ -10,12 +12,13 @@ export const invoke = async (
 export type AudioDevice = { name: string; default: boolean };
 export type AudioDevices = { input: AudioDevice[]; output: AudioDevice[] };
 
-export type Member = { session: number; name: string; self: boolean };
+export type Member = { session: number; name: string; self: boolean; db: number | null };
 
 export type EngineEvent =
   | { t: "room_joined"; room: string }
   | { t: "peer_joined"; session: number; name: string }
   | { t: "peer_left"; session: number }
+  | { t: "peer_level"; session: number; db: number }
   | { t: "direct"; peer: string; ms: number }
   | { t: "ended"; why: string }
   | { t: "status"; text: string }
@@ -52,7 +55,6 @@ export const call = $state({
   input: localStorage.getItem("star2.in") ?? "",
   output: localStorage.getItem("star2.out") ?? "",
   members: [] as Member[],
-  micDb: null as number | null,
 });
 
 export async function refreshDevices(): Promise<void> {
@@ -74,6 +76,7 @@ export async function refreshDevices(): Promise<void> {
 }
 
 export async function join(roomInput: string): Promise<void> {
+  ensureMic();
   call.fatal = "";
   call.phase = "connecting";
   try {
@@ -86,7 +89,7 @@ export async function join(roomInput: string): Promise<void> {
     call.room = token;
     localStorage.setItem("star2.room", token);
     const name = (await invoke("display_name")) as string;
-    call.members = [{ session: 0, name, self: true }];
+    call.members = [{ session: 0, name, self: true, db: null }];
   } catch (e) {
     call.fatal = String(e);
     call.phase = "down";
@@ -101,7 +104,6 @@ export async function leave(): Promise<void> {
   call.phase = "idle";
   call.status = "idle";
   call.members = [];
-  call.micDb = null;
   await refreshDevices();
 }
 

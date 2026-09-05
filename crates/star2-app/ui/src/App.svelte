@@ -1,7 +1,7 @@
 <script lang="ts">
   import { call, copyRoom, join, leave, listenEngine, refreshDevices } from "./lib/engine.svelte";
   import { inBrowser, mockAddPeer, mockRemovePeer } from "./lib/browser-dev.svelte";
-  import Spectrum from "./lib/Spectrum.svelte";
+  import VoiceBars from "./lib/VoiceBars.svelte";
 
   let roomInput = $state(call.room);
   let copied = $state(false);
@@ -17,12 +17,17 @@
           break;
         case "peer_joined":
           if (!call.members.some((m) => m.session === e.session)) {
-            call.members.push({ session: e.session, name: e.name, self: false });
+            call.members.push({ session: e.session, name: e.name, self: false, db: null });
           }
           break;
         case "peer_left":
           call.members = call.members.filter((m) => m.session !== e.session);
           break;
+        case "peer_level": {
+          const m = call.members.find((x) => x.session === e.session);
+          if (m) m.db = e.db;
+          break;
+        }
         case "direct":
           call.status = `connected · ${e.peer}`;
           call.phase = "live";
@@ -39,11 +44,12 @@
           call.fatal = e.why;
           call.phase = "down";
           call.members = [];
-          call.micDb = null;
           break;
-        case "stats":
-          call.micDb = e.mic_db;
+        case "stats": {
+          const me = call.members.find((m) => m.self);
+          if (me) me.db = e.mic_db;
           break;
+        }
         default:
           break; // the rest of stats and log stay out of the window; star2.log holds history (CLAUDE.md §4)
       }
@@ -140,9 +146,12 @@
         <div class="grid min-h-0 flex-1 gap-2 {gridCols}">
           {#each call.members as m (m.session)}
             <div class="tile">
-              <span class="grid size-12 place-items-center rounded-full bg-[#1b1e22] text-lg font-bold text-accent">
+              <span class="grid size-11 place-items-center rounded-full bg-[#1b1e22] text-base font-bold text-accent">
                 {m.name[0]?.toUpperCase()}
               </span>
+              <div class="w-full px-4">
+                <VoiceBars member={m} />
+              </div>
               <span class="flex items-center gap-1.5">
                 <span class="truncate">{m.name}</span>
                 {#if m.self}
@@ -152,18 +161,15 @@
             </div>
           {/each}
         </div>
-        <div class="shrink-0 border-t border-line px-2">
-          <Spectrum />
-        </div>
         <button
-          class="absolute bottom-14 left-2 max-w-[60%] cursor-pointer truncate rounded border border-line bg-bg/80 px-2 py-0.5 text-[11px] text-dim hover:border-accent hover:text-neutral-200"
+          class="absolute bottom-2 left-2 max-w-[60%] cursor-pointer truncate rounded border border-line bg-bg/80 px-2 py-0.5 text-[11px] text-dim hover:border-accent hover:text-neutral-200"
           title="room token — click to copy"
           onclick={() => void copy()}
         >
           {copied ? "copied" : call.room}
         </button>
         {#if inBrowser}
-          <div class="absolute right-2 bottom-14 flex gap-1.5">
+          <div class="absolute right-2 bottom-2 flex gap-1.5">
             <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockAddPeer()}>+ peer</button>
             <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockRemovePeer()}>− peer</button>
           </div>
