@@ -4,7 +4,7 @@
 
 let ctx: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
-let timeBuf: Float32Array<ArrayBuffer> | null = null;
+let bins: Uint8Array<ArrayBuffer> | null = null;
 let opening: Promise<void> | null = null;
 
 export const inBrowser = typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -22,18 +22,18 @@ export function ensureMic(): void {
       if (!ctx) return;
       const an = ctx.createAnalyser();
       an.fftSize = 2048;
-      an.smoothingTimeConstant = 0.78;
+      an.smoothingTimeConstant = 0.85;
       ctx.createMediaStreamSource(stream).connect(an);
       analyser = an;
+      bins = new Uint8Array(an.frequencyBinCount);
     })
     .catch(() => {
       analyser = null;
     });
 }
 
-export function voiceWave(): Float32Array<ArrayBuffer> | null {
-  if (!analyser) return null;
-  timeBuf ??= new Float32Array(analyser.fftSize);
-  analyser.getFloatTimeDomainData(timeBuf);
-  return timeBuf;
+export function voiceSpectrum(): { bins: Uint8Array<ArrayBuffer>; binHz: number } | null {
+  if (!analyser || !bins || !ctx) return null;
+  analyser.getByteFrequencyData(bins);
+  return { bins, binHz: ctx.sampleRate / analyser.fftSize };
 }

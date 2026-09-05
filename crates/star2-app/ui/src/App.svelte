@@ -1,7 +1,7 @@
 <script lang="ts">
   import { call, copyRoom, join, leave, listenEngine, refreshDevices } from "./lib/engine.svelte";
   import { inBrowser, mockAddPeer, mockRemovePeer } from "./lib/browser-dev.svelte";
-  import VoiceBars from "./lib/VoiceBars.svelte";
+  import VoiceLine from "./lib/VoiceLine.svelte";
 
   let roomInput = $state(call.room);
   let copied = $state(false);
@@ -150,7 +150,7 @@
                 {m.name[0]?.toUpperCase()}
               </span>
               <div class="w-full px-4">
-                <VoiceBars member={m} />
+                <VoiceLine member={m} />
               </div>
               <span class="flex items-center gap-1.5">
                 <span class="truncate">{m.name}</span>
