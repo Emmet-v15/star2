@@ -67,38 +67,44 @@
     }
 
     const xs = new Float32Array(POINTS);
-    const ys = new Float32Array(POINTS);
+    const up = new Float32Array(POINTS);
+    const down = new Float32Array(POINTS);
     for (let i = 0; i < POINTS; i++) {
       xs[i] = (i / (POINTS - 1)) * w;
-      ys[i] = h - 2 - (smooth[i] ?? 0) * (h - 7);
+      up[i] = h / 2 - (smooth[i] ?? 0) * (h / 2 - 1);
+      down[i] = h / 2 + (smooth[i] ?? 0) * (h / 2 - 1);
     }
 
     const path = new Path2D();
-    path.moveTo(xs[0] ?? 0, ys[0] ?? 0);
+    path.moveTo(xs[0] ?? 0, up[0] ?? 0);
     for (let i = 1; i < POINTS - 1; i++) {
       const mx = ((xs[i] ?? 0) + (xs[i + 1] ?? 0)) / 2;
-      const my = ((ys[i] ?? 0) + (ys[i + 1] ?? 0)) / 2;
-      path.quadraticCurveTo(xs[i] ?? 0, ys[i] ?? 0, mx, my);
+      const my = ((up[i] ?? 0) + (up[i + 1] ?? 0)) / 2;
+      path.quadraticCurveTo(xs[i] ?? 0, up[i] ?? 0, mx, my);
     }
-    path.lineTo(xs[POINTS - 1] ?? 0, ys[POINTS - 1] ?? 0);
+    for (let i = POINTS - 1; i > 0; i--) {
+      const mx = ((xs[i] ?? 0) + (xs[i - 1] ?? 0)) / 2;
+      const my = ((down[i] ?? 0) + (down[i - 1] ?? 0)) / 2;
+      path.quadraticCurveTo(xs[i] ?? 0, down[i] ?? 0, mx, my);
+    }
+    path.closePath();
 
-    const fill = new Path2D(path);
-    fill.lineTo(w, h);
-    fill.lineTo(0, h);
-    fill.closePath();
-    const grad = g.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, "rgba(62,166,255,0.22)");
-    grad.addColorStop(1, "rgba(62,166,255,0)");
-    g.fillStyle = grad;
-    g.fill(fill);
-
+    g.fillStyle = "rgba(62,166,255,0.16)";
+    g.fill(path);
     g.strokeStyle = "rgba(62,166,255,0.95)";
-    g.lineWidth = 1.8;
+    g.lineWidth = 1.6;
     g.lineJoin = "round";
     g.shadowColor = "rgba(62,166,255,0.8)";
     g.shadowBlur = 6;
     g.stroke(path);
     g.shadowBlur = 0;
+
+    g.strokeStyle = "rgba(124,130,140,0.35)";
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(0, h / 2);
+    g.lineTo(w, h / 2);
+    g.stroke();
   }
 
   $effect(() => {
@@ -108,4 +114,4 @@
   });
 </script>
 
-<canvas bind:this={canvas} class="block h-7 w-full" aria-hidden="true"></canvas>
+<canvas bind:this={canvas} class="block h-10 w-full" aria-hidden="true"></canvas>

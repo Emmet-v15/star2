@@ -149,7 +149,7 @@
               <span class="grid size-11 place-items-center rounded-full bg-[#1b1e22] text-base font-bold text-accent">
                 {m.name[0]?.toUpperCase()}
               </span>
-              <div class="w-full px-4">
+              <div class="mx-auto w-1/2">
                 <VoiceLine member={m} />
               </div>
               <span class="flex items-center gap-1.5">
