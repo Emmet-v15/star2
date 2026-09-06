@@ -16,6 +16,13 @@ const j = async (method, path, body) => {
 };
 
 const HOOK = `
+  const OrigDec = window.AudioDecoder;
+  window.AudioDecoder = class extends OrigDec {
+    decode(c) {
+      try { super.decode(c); window.__rtc.push("decode ok: " + c.type); }
+      catch (e) { window.__rtc.push("decode ERROR: " + e.message); }
+    }
+  };
   window.__rtc = [];
   const log = (m) => window.__rtc.push(m);
   const OrigPC = window.RTCPeerConnection;

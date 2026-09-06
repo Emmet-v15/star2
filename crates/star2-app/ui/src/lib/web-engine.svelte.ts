@@ -64,6 +64,7 @@ let tsUs = 0;
 let rxTsUs = 0;
 let rxSum = 0;
 let rxCount = 0;
+let firstChunk = true;
 let hostCands = 0;
 let explained = false;
 let welcomed = false;
@@ -419,7 +420,19 @@ function onChannelData(buf: ArrayBuffer): void {
   if (buf.byteLength < 12 || !decoder) return;
   if (new DataView(buf).getUint8(0) !== PROTO_VERSION) return;
   rxTsUs += 5000;
-  decoder.decode(new EncodedAudioChunk({ type: "delta", timestamp: rxTsUs, data: new Uint8Array(buf, 12) }));
+  try {
+    // WebCodecs refuses deltas until the decoder has seen one key chunk.
+    decoder.decode(
+      new EncodedAudioChunk({
+        type: firstChunk ? "key" : "delta",
+        timestamp: rxTsUs,
+        data: new Uint8Array(buf, 12),
+      }),
+    );
+    firstChunk = false;
+  } catch (e) {
+    hangup(`decode: ${(e as Error).message}`, true);
+  }
 }
 
 function teardown(): void {
@@ -450,6 +463,7 @@ function teardown(): void {
   pc = null;
   peer = 0;
   hostCands = 0;
+  firstChunk = true;
   seq = ts = tsUs = rxTsUs = 0;
   rxSum = rxCount = 0;
 }
