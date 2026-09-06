@@ -120,7 +120,7 @@
   }
 
   $effect(() => {
-    ensureMic();
+    void ensureMic();
     const raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   });

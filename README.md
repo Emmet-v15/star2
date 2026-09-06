@@ -28,7 +28,11 @@ no-op. That is why redundancy is done at the packet layer instead — see below.
 |---|---|
 | `star2-rendezvous` | the server on empire: WebSocket rendezvous + UDP reflexive responder |
 | `star2-app`    | the `star2` window: a thin Tauri shell (join, status) plus self-update |
-| `guest/`       | a static browser page: joins a room as a WebRTC data-channel guest |
+
+`star2-app/ui` builds twice from one source: into the Tauri window, and into the
+web app at <https://star.v15.studio/>, which joins a room as a WebRTC
+data-channel guest. `engine.svelte.ts` picks the engine underneath — the Tauri
+bridge, or `web-engine.svelte.ts` — and nothing above that line knows which.
 
 The wire format and the client core are no longer here. They are libraries in
 [`star-libs`](../star-libs), a sibling checkout, and star2 depends on them by

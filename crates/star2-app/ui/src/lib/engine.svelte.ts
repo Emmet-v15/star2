@@ -1,13 +1,12 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { inBrowser } from "./mic";
-import { listenMock, mockInvoke } from "./browser-dev.svelte";
-import { ensureMic } from "./mic";
+import { listenWeb, webInvoke } from "./web-engine.svelte";
 
 export const invoke = async (
   cmd: string,
   args?: Record<string, unknown>,
-): Promise<unknown> => (inBrowser ? mockInvoke(cmd, args) : tauriInvoke(cmd, args));
+): Promise<unknown> => (inBrowser ? webInvoke(cmd, args) : tauriInvoke(cmd, args));
 
 export type AudioDevice = { name: string; default: boolean };
 export type AudioDevices = { input: AudioDevice[]; output: AudioDevice[] };
@@ -76,7 +75,6 @@ export async function refreshDevices(): Promise<void> {
 }
 
 export async function join(roomInput: string): Promise<void> {
-  ensureMic();
   call.fatal = "";
   call.phase = "connecting";
   try {
@@ -114,6 +112,6 @@ export async function copyRoom(): Promise<void> {
 }
 
 export async function listenEngine(onEvent: (e: EngineEvent) => void): Promise<UnlistenFn> {
-  if (inBrowser) return listenMock(onEvent);
+  if (inBrowser) return listenWeb(onEvent);
   return listen<EngineEvent>("engine", (e) => onEvent(e.payload));
 }

@@ -230,10 +230,12 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
             match cm {
                 ClientMsg::Hello { name, ver, token, build } => {
                     if ver != star_proto::PROTO_VERSION as u32 {
+                        eprintln!("[rendezvous] refused {name} build={build}: proto {ver} != {}", star_proto::PROTO_VERSION);
                         let _ = tx.send(ServerMsg::Error { msg: format!("proto {ver} != {}", star_proto::PROTO_VERSION) });
                         break;
                     }
                     if token != app.token {
+                        eprintln!("[rendezvous] refused {name} build={build}: bad token");
                         let _ = tx.send(ServerMsg::Error { msg: "bad token".into() });
                         break;
                     }
@@ -248,6 +250,7 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
                     id = Some(me);
                 }
                 _ => {
+                    eprintln!("[rendezvous] refused a connection that spoke before Hello");
                     let _ = tx.send(ServerMsg::Error { msg: "expected Hello".into() });
                     break;
                 }
@@ -264,7 +267,8 @@ async fn client_conn(sock: WebSocket, app: Arc<App>) {
         hub.sessions.remove(&me);
         eprintln!("[rendezvous] session {me} gone");
     }
-    writer.abort();
+    drop(tx);
+    let _ = writer.await;
 }
 
 fn handle(app: &App, me: SessionId, cm: ClientMsg) {

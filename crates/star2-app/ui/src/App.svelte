@@ -1,6 +1,5 @@
 <script lang="ts">
   import { call, copyRoom, join, leave, listenEngine, refreshDevices } from "./lib/engine.svelte";
-  import { inBrowser, mockAddPeer, mockRemovePeer } from "./lib/browser-dev.svelte";
   import VoiceLine from "./lib/VoiceLine.svelte";
 
   let roomInput = $state(call.room);
@@ -168,12 +167,6 @@
         >
           {copied ? "copied" : call.room}
         </button>
-        {#if inBrowser}
-          <div class="absolute right-2 bottom-2 flex gap-1.5">
-            <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockAddPeer()}>+ peer</button>
-            <button class="btn px-2 py-0.5 text-[11px]" onclick={() => mockRemovePeer()}>− peer</button>
-          </div>
-        {/if}
       {:else if call.phase === "connecting"}
         <div class="grid h-full place-items-center">
           <div class="flex flex-col items-center gap-2 text-dim">

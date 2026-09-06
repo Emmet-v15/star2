@@ -10,8 +10,9 @@ The rendezvous box is reached as `ssh empire` — the service lives in
 |---|---|
 | `publish-client.sh` | build `star2.exe`, upload it to `v15.studio/star2.exe`, write the manifest, nudge every connected client |
 | `deploy-rendezvous.sh` | cross-compile the rendezvous server to aarch64 and restart it on empire |
+| `publish-web.sh` | build the window as a web app and upload it to `star.v15.studio` |
 | `star2-rendezvous.service` | the systemd unit as installed on empire |
-| `nginx-star2.conf` | the nginx location block added to v1's vhost |
+| `nginx-star2.conf` | the nginx blocks added to v1's vhost |
 
 ## Publish a client build
 
@@ -22,6 +23,38 @@ The rendezvous box is reached as `ssh empire` — the service lives in
 Run it from Windows — `audiopus_sys` compiles libopus from source for the host
 arch, so there's no cross-build shortcut for the client, and Windows is the only
 platform we ship. The rendezvous server is the opposite: pure Rust, cross-compiles fine.
+
+## Publish the web app
+
+```sh
+./deploy/publish-web.sh
+```
+
+This is the same `crates/star2-app/ui` the Tauri window loads, built for the
+browser. There is no second UI: `engine.svelte.ts` sends its commands to the
+Tauri bridge or to `web-engine.svelte.ts`, and `App.svelte` cannot tell which.
+The web engine speaks the rendezvous protocol over a WebSocket and carries media
+over a WebRTC data channel, framed as the datagram a native peer would have sent.
+
+It lives at the root of <https://star.v15.studio/>, served from
+`/var/www/star.v15.studio` by the same vhost that proxies `/star2` — which is
+why it needs no configuring: on `https:` it defaults its rendezvous URL to
+`wss://star.v15.studio/star2`, its own origin. Nothing restarts, so publishing
+never touches a call in progress.
+
+Override the defaults from the URL hash when testing against a local server:
+`https://star.v15.studio/#rv=ws://localhost:9101&token=star2-dev`. For UI work
+alone, `bun run dev` in `crates/star2-app/ui` serves the same app on :5173.
+
+Two costs worth knowing about:
+
+- The app carries `RENDEZVOUS_TOKEN` — the same one compiled into `star2.exe`,
+  so it was already public in every download; this only makes it readable
+  without `strings`. Rotating it means changing `main.rs`, `star2.env` and
+  `web-engine.svelte.ts` together, and publishing a client build in the same breath.
+- `ui/src/lib/room.ts` is a port of star-proto's `room.rs`. It is the one place
+  a wire format lives in two languages, and it is there because a browser that
+  cannot mint a token can only join guessable rooms. Change both together.
 
 ## Deploy the rendezvous server
 
