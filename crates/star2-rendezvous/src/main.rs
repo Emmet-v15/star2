@@ -335,6 +335,8 @@ fn handle(app: &App, me: SessionId, cm: ClientMsg) {
             forward(&hub, me, to, ServerMsg::P2pCandidate { from: me, cand })
         }
         ClientMsg::P2pAbort { to } => forward(&hub, me, to, ServerMsg::P2pAbort { from: me }),
+        ClientMsg::SdpOffer { to, sdp } => forward(&hub, me, to, ServerMsg::SdpOffer { from: me, sdp }),
+        ClientMsg::SdpAnswer { to, sdp } => forward(&hub, me, to, ServerMsg::SdpAnswer { from: me, sdp }),
     }
 }
 
