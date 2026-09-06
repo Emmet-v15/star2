@@ -15,13 +15,19 @@
   const phases = Array.from({ length: POINTS }, () => Math.random() * Math.PI * 2);
 
   // Self traces the real FFT; a remote peer gets a voice-formant shape driven
-  // by the level the engine reports for them.
+  // by the level the engine reports for them. The frequency axis is mirrored
+  // around the center of the line: 60 Hz in the middle, 16 kHz at both edges.
+  const HALF = POINTS / 2;
+
   function target(i: number, t: number): number {
+    const center = (POINTS - 1) / 2;
+    const d = Math.abs(i - center) / center;
+    const k = Math.min(HALF - 1, Math.round(d * (HALF - 1)));
     if (member.self) {
       const mic = voiceSpectrum();
       if (mic) {
-        const fLo = F_MIN * Math.pow(F_MAX / F_MIN, i / POINTS);
-        const fHi = F_MIN * Math.pow(F_MAX / F_MIN, (i + 1) / POINTS);
+        const fLo = F_MIN * Math.pow(F_MAX / F_MIN, k / HALF);
+        const fHi = F_MIN * Math.pow(F_MAX / F_MIN, (k + 1) / HALF);
         const lo = Math.max(1, Math.floor(fLo / mic.binHz));
         const hi = Math.min(mic.bins.length - 1, Math.max(lo + 1, Math.ceil(fHi / mic.binHz)));
         let sum = 0;
@@ -32,12 +38,12 @@
     }
     const db = member.db ?? DB_FLOOR;
     const amp = Math.min(1, Math.max(0, (db - DB_FLOOR) / DB_SPAN));
-    const fc = Math.log10(F_MIN * Math.pow(F_MAX / F_MIN, (i + 0.5) / POINTS));
+    const fc = Math.log10(F_MIN * Math.pow(F_MAX / F_MIN, (k + 0.5) / HALF));
     const ph = phases[i] ?? 0;
     const formant =
-      Math.exp(-Math.pow((fc - 2.6) / 0.35, 2)) * 1.0 +
-      Math.exp(-Math.pow((fc - 3.1) / 0.5, 2)) * 0.55 +
-      Math.exp(-Math.pow((fc - 3.9) / 0.7, 2)) * 0.25;
+      Math.exp(-Math.pow((fc - 2.15) / 0.5, 2)) * 1.0 +
+      Math.exp(-Math.pow((fc - 2.75) / 0.55, 2)) * 0.55 +
+      Math.exp(-Math.pow((fc - 3.4) / 0.75, 2)) * 0.3;
     const breathe =
       0.8 +
       0.2 *
