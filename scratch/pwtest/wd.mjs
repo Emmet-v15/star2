@@ -101,6 +101,8 @@ for (let i = 0; i < 25; i++) {
 for (const [i, g] of [A, B].entries()) {
   const log = await run(g, "return window.__rtc.join('\\n')");
   console.log(`\n===== guest ${String.fromCharCode(65 + i)} rtc log =====\n${log}`);
+  const body = await run(g, "return document.body.innerText");
+  console.log(`----- guest ${String.fromCharCode(65 + i)} page -----\n${body}`);
 }
 
 for (const g of [A, B]) await j(g.driver, "DELETE", `/session/${g.id}`);

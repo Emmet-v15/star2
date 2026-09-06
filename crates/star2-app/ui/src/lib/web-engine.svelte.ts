@@ -64,6 +64,7 @@ let tsUs = 0;
 let rxTsUs = 0;
 let rxSum = 0;
 let rxCount = 0;
+let hostCands = 0;
 let explained = false;
 let welcomed = false;
 
@@ -197,7 +198,11 @@ function wireChannel(ch: RTCDataChannel): void {
   dc = ch;
   ch.binaryType = "arraybuffer";
   ch.onopen = () => void startAudio();
-  ch.onclose = () => hangup("channel closed", false);
+  // When ICE has already failed, the connection handler owns the hangup and
+  // its diagnosis; a channel is only "closed" news on a healthy connection.
+  ch.onclose = () => {
+    if (pc?.connectionState !== "failed") hangup("channel closed", false);
+  };
   ch.onmessage = (e) => onChannelData(e.data as ArrayBuffer);
 }
 
@@ -207,11 +212,21 @@ function watchPc(conn: RTCPeerConnection): void {
   };
 }
 
+// Count what we are actually signalling: the candidates a peer could dial.
+// WebRTC leak protection (Firefox's media.peerconnection.ice.no_host) leaves
+// the srflx addresses only, and then nobody on our own network can reach us.
+function gatherCounter(conn: RTCPeerConnection): void {
+  conn.onicecandidate = (e) => {
+    if (e.candidate?.candidate.includes("typ host")) hostCands++;
+  };
+}
+
 async function invite(to: number): Promise<void> {
   status("negotiating");
   pc = new RTCPeerConnection(RTC_CONFIG);
   wireChannel(pc.createDataChannel("media", { ordered: false, maxRetransmits: 0 }));
   watchPc(pc);
+  gatherCounter(pc);
 
   await pc.setLocalDescription(await pc.createOffer());
   await gathered(pc);
@@ -224,6 +239,7 @@ async function accept(to: number, sdp: string): Promise<void> {
   pc = new RTCPeerConnection(RTC_CONFIG);
   pc.ondatachannel = (e) => wireChannel(e.channel);
   watchPc(pc);
+  gatherCounter(pc);
 
   await pc.setRemoteDescription({ type: "offer", sdp });
   await pc.setLocalDescription(await pc.createAnswer());
@@ -433,14 +449,28 @@ function teardown(): void {
   dc = null;
   pc = null;
   peer = 0;
+  hostCands = 0;
   seq = ts = tsUs = rxTsUs = 0;
   rxSum = rxCount = 0;
 }
 
-function hangup(why: string, fatal: boolean): void {
+// The terminal handler for a dying call, whichever of the channel and the
+// connection notices first. An ICE failure is the one hangup worth naming:
+// with leak protection gathering no host candidates, a bare "connection
+// failed" hides that the browser itself blocked the call.
+function hangup(why: string, fatalIn: boolean): void {
+  const conn = pc;
+  if (!conn) return;
+  const iceFailed = conn.connectionState === "failed";
+  const fatal = fatalIn || iceFailed;
+  let msg = iceFailed ? "connection failed" : why;
+  if (iceFailed && hostCands === 0) {
+    msg +=
+      " - your browser hid every local address (WebRTC leak protection), so peers on your network cannot reach you. In Firefox: about:config, reset media.peerconnection.ice.no_host";
+  }
   teardown();
   closeMic();
-  emit(fatal ? { t: "ended", why } : { t: "status", text: `idle - ${why}` });
+  emit(fatal ? { t: "ended", why: msg } : { t: "status", text: `idle - ${msg}` });
 }
 
 function leave(): void {
