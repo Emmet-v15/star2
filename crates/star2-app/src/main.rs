@@ -189,6 +189,11 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                         Event::RoomJoined { room } => log(&format!("joined {room}")),
                         Event::Ended { why } => log(&format!("ended: {why}")),
                         Event::Stats { .. } => {}
+                        Event::PeerJoined { session, name } => {
+                            log(&format!("peer {name} (s{session}) in roster"))
+                        }
+                        Event::PeerLeft { session } => log(&format!("peer s{session} left roster")),
+                        Event::PeerLevel { .. } => {}
                     }
                     let _ = emitter.emit("engine", e);
                 }) {
