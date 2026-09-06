@@ -9,6 +9,7 @@ and neither belongs in a `cargo test --workspace` run.
 |---|---|
 | `rustselfupdater` | star2's self-update flow lifted out as a standalone crate — manifest fetch, SHA-256 verify, rename-swap, relaunch. `crates/star2-app/src/updater.rs` is the version that ships. |
 | `star2-demo-rig` | a two-peer local loopback rig: serve `star2.json` over `http://127.0.0.1:8123`, point one build at it, watch it update itself. |
+| `pwtest` | WebDriver rig that drives the real Firefox through geckodriver (ports 7000/7001) against a local rendezvous, capturing every ICE candidate. Found the `no_host` pref and the playout underflow; `bun wd.mjs` is guest-vs-guest, `bun wd-native.mjs <token>` is guest-vs-native. |
 
 ## What was deliberately not folded in
 
