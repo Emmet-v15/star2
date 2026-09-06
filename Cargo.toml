@@ -5,7 +5,7 @@ exclude = ["scratch"]
 
 [workspace.package]
 edition = "2021"
-version = "0.4.8"
+version = "0.4.9"
 license = "MIT"
 
 [workspace.dependencies]

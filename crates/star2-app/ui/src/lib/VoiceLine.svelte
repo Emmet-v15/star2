@@ -24,6 +24,13 @@
     const center = (POINTS - 1) / 2;
     const d = Math.abs(i - center) / center;
     const k = Math.min(HALF - 1, Math.round(d * (HALF - 1)));
+    // The desktop engine meters real FFT bands (left then right) for every
+    // voice, self included; the web self uses its own AnalyserNode, and only
+    // a remote web peer without bands falls back to the formant template.
+    const bands = member.bins;
+    if (bands) {
+      return Math.min(1, (bands[channel * HALF + k] ?? 0) * 1.25);
+    }
     if (member.self) {
       const mic = voiceSpectrum(channel);
       if (mic) {

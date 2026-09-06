@@ -11,13 +11,20 @@ export const invoke = async (
 export type AudioDevice = { name: string; default: boolean };
 export type AudioDevices = { input: AudioDevice[]; output: AudioDevice[] };
 
-export type Member = { session: number; name: string; self: boolean; db: number | null };
+export type Member = {
+  session: number;
+  name: string;
+  self: boolean;
+  db: number | null;
+  bins: number[] | null;
+};
 
 export type EngineEvent =
   | { t: "room_joined"; room: string }
   | { t: "peer_joined"; session: number; name: string }
   | { t: "peer_left"; session: number }
   | { t: "peer_level"; session: number; db: number }
+  | { t: "spectrum"; session: number; bins: number[] }
   | { t: "direct"; peer: string; ms: number }
   | { t: "ended"; why: string }
   | { t: "status"; text: string }
@@ -87,7 +94,7 @@ export async function join(roomInput: string): Promise<void> {
     call.room = token;
     localStorage.setItem("star2.room", token);
     const name = (await invoke("display_name")) as string;
-    call.members = [{ session: 0, name, self: true, db: null }];
+    call.members = [{ session: 0, name, self: true, db: null, bins: null }];
   } catch (e) {
     call.fatal = String(e);
     call.phase = "down";

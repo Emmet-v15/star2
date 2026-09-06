@@ -193,7 +193,7 @@ fn own_calls(app: AppHandle, rx: Receiver<CallMsg>) {
                             log(&format!("peer {name} (s{session}) in roster"))
                         }
                         Event::PeerLeft { session } => log(&format!("peer s{session} left roster")),
-                        Event::PeerLevel { .. } => {}
+                        Event::PeerLevel { .. } | Event::Spectrum { .. } => {}
                     }
                     let _ = emitter.emit("engine", e);
                 }) {

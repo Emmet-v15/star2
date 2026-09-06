@@ -16,7 +16,7 @@
           break;
         case "peer_joined":
           if (!call.members.some((m) => m.session === e.session)) {
-            call.members.push({ session: e.session, name: e.name, self: false, db: null });
+            call.members.push({ session: e.session, name: e.name, self: false, db: null, bins: null });
           }
           break;
         case "peer_left":
@@ -25,6 +25,15 @@
         case "peer_level": {
           const m = call.members.find((x) => x.session === e.session);
           if (m) m.db = e.db;
+          break;
+        }
+        case "spectrum": {
+          // session 0 is our own microphone
+          const m =
+            e.session === 0
+              ? call.members.find((x) => x.self)
+              : call.members.find((x) => x.session === e.session);
+          if (m) m.bins = e.bins;
           break;
         }
         case "direct":
