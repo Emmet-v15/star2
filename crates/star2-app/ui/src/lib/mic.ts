@@ -19,7 +19,18 @@ export function ensureMic(): void {
   if (ctx.state === "suspended") void ctx.resume();
   if (opening) return;
   opening = navigator.mediaDevices
-    .getUserMedia({ audio: true })
+    .getUserMedia({
+      // Visualizer wants raw channels: Firefox defaults the mic to mono unless
+      // channelCount is asked for, and the browser's echo/gain processing
+      // downmixes to mono on some platforms, so all of it is off. Dev-only;
+      // the Tauri engine captures its own audio.
+      audio: {
+        channelCount: 2,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    })
     .then((stream) => {
       if (!ctx) return;
       const settings = stream.getAudioTracks()[0]?.getSettings();
