@@ -76,6 +76,12 @@ for (let i = 0; i < 25; i++) {
 }
 console.log("final status:", status);
 
+const canvas = await j("POST", `/session/${id}/execute/sync`, {
+  script: "return (() => { const c = document.querySelector('canvas'); return c ? `${c.width}x${c.height}` : 'no canvas'; })()",
+  args: [],
+});
+console.log("canvas:", canvas);
+
 const log = await j("POST", `/session/${id}/execute/sync`, {
   script: "return window.__rtc.join('\\n')",
   args: [],

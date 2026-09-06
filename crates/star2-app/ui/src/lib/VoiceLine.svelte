@@ -11,6 +11,7 @@
   let { member }: { member: Member } = $props();
 
   let canvas: HTMLCanvasElement;
+  let raf = 0;
   const smooth = new Float32Array(POINTS * 2);
   const phases = Array.from({ length: POINTS }, () => Math.random() * Math.PI * 2);
 
@@ -52,11 +53,16 @@
   }
 
   function draw(): void {
-    const raf = requestAnimationFrame(draw);
+    // The canvas binding is nulled when the tile unmounts; stop instead of
+    // rescheduling into a throw every frame.
+    if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
-    if (w === 0 || h === 0) return;
+    if (w === 0 || h === 0) {
+      raf = requestAnimationFrame(draw);
+      return;
+    }
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
@@ -117,11 +123,13 @@
     g.moveTo(0, h / 2);
     g.lineTo(w, h / 2);
     g.stroke();
+
+    raf = requestAnimationFrame(draw);
   }
 
   $effect(() => {
     void ensureMic();
-    const raf = requestAnimationFrame(draw);
+    raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   });
 </script>
