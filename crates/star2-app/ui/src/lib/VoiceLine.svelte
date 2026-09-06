@@ -11,20 +11,20 @@
   let { member }: { member: Member } = $props();
 
   let canvas: HTMLCanvasElement;
-  const smooth = new Float32Array(POINTS);
+  const smooth = new Float32Array(POINTS * 2);
   const phases = Array.from({ length: POINTS }, () => Math.random() * Math.PI * 2);
 
-  // Self traces the real FFT; a remote peer gets a voice-formant shape driven
-  // by the level the engine reports for them. The frequency axis is mirrored
-  // around the center of the line: 60 Hz in the middle, 16 kHz at both edges.
+  // Self traces the real FFT per channel - top curve is the left channel,
+  // bottom the right; a mono source feeds both, so the lens stays symmetric.
+  // A remote peer has one level, so its two halves are the same shape.
   const HALF = POINTS / 2;
 
-  function target(i: number, t: number): number {
+  function target(i: number, t: number, channel: 0 | 1): number {
     const center = (POINTS - 1) / 2;
     const d = Math.abs(i - center) / center;
     const k = Math.min(HALF - 1, Math.round(d * (HALF - 1)));
     if (member.self) {
-      const mic = voiceSpectrum();
+      const mic = voiceSpectrum(channel);
       if (mic) {
         const fLo = F_MIN * Math.pow(F_MAX / F_MIN, k / HALF);
         const fHi = F_MIN * Math.pow(F_MAX / F_MIN, (k + 1) / HALF);
@@ -68,8 +68,14 @@
 
     const t = performance.now() / 1000;
     for (let i = 0; i < POINTS; i++) {
-      const v = target(i, t);
-      smooth[i] = (smooth[i] ?? 0) + (v - (smooth[i] ?? 0)) * (v > (smooth[i] ?? 0) ? 0.45 : 0.1);
+      for (const [ch, off] of [
+        [0, 0],
+        [1, POINTS],
+      ] as const) {
+        const v = target(i, t, ch);
+        const s = smooth[off + i] ?? 0;
+        smooth[off + i] = s + (v - s) * (v > s ? 0.45 : 0.1);
+      }
     }
 
     const xs = new Float32Array(POINTS);
@@ -78,7 +84,7 @@
     for (let i = 0; i < POINTS; i++) {
       xs[i] = (i / (POINTS - 1)) * w;
       up[i] = h / 2 - (smooth[i] ?? 0) * (h / 2 - 1);
-      down[i] = h / 2 + (smooth[i] ?? 0) * (h / 2 - 1);
+      down[i] = h / 2 + (smooth[POINTS + i] ?? 0) * (h / 2 - 1);
     }
 
     const path = new Path2D();
@@ -120,4 +126,9 @@
   });
 </script>
 
-<canvas bind:this={canvas} class="block h-10 w-full" aria-hidden="true"></canvas>
+<canvas
+  bind:this={canvas}
+  class="block h-10 w-full"
+  title="spectrum — top: left channel, bottom: right"
+  aria-hidden="true"
+></canvas>
