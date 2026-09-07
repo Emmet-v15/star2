@@ -8,6 +8,13 @@ license.workspace = true
 name = "star2"
 path = "src/main.rs"
 
+[features]
+# Serves the bundled ui/dist instead of build.devUrl. Without it the window
+# loads http://localhost:5173, which only works where a dev server happens to
+# run. cargo tauri dev stays on the dev server because the feature is off by
+# default; release builds pass it explicitly.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

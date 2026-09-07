@@ -5,7 +5,7 @@
   "identifier": "studio.v15.star2",
   "build": {
     "devUrl": "http://localhost:5173",
-    "frontendDist": "../ui/dist",
+    "frontendDist": "ui/dist",
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build"
   },

@@ -1,3 +1,7 @@
+// A GUI app: diagnostics live in star2.log beside the binary, so there is no
+// reason to drag an empty console window onto every user's taskbar.
+#![windows_subsystem = "windows"]
+
 mod updater;
 
 use std::fs::OpenOptions;
@@ -355,6 +359,8 @@ fn spawn_upkeep(app: AppHandle) {
 fn main() {
     let me = std::env::current_exe().expect("locate the running binary");
     open_log(&me);
+    // The console is gone, so a panic would otherwise vanish unheard.
+    std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
     star_voice::set_verbose(true);
     tauri::Builder::default()
         .setup(|app| {

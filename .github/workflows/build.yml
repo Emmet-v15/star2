@@ -32,7 +32,10 @@ jobs:
 
       - name: Build client
         working-directory: star2
-        run: cargo build --release -p star2-app
+        # custom-protocol bundles ui/dist; without it the exe loads devUrl
+        # (http://localhost:5173) and shows "localhost refused to connect"
+        # on any machine without a dev server.
+        run: cargo build --release -p star2-app --features star2-app/custom-protocol
 
       - name: Test
         working-directory: star2

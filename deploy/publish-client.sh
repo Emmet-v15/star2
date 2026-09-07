@@ -36,7 +36,7 @@ fi
 echo "==> version $LIVE -> $VER"
 
 echo "==> building $LOCAL"
-cargo build --release -p star2-app
+cargo build --release -p star2-app --features star2-app/custom-protocol
 
 echo "==> uploading -> $WEBROOT/$REMOTE"
 # Upload to /tmp then move: opc can't write the webroot directly, and a
